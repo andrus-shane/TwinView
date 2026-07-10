@@ -1,0 +1,54 @@
+{
+  "model": "NTL99925",
+  "bindings": [
+    {
+      "nodeName": "Belt",
+      "role": "belt",
+      "channels": [
+        "belt_speed"
+      ],
+      "sensor": {
+        "kind": "mock",
+        "note": "belt tachometer"
+      }
+    },
+    {
+      "nodeName": "Deck_Assembly",
+      "role": "deck",
+      "channels": [
+        "incline"
+      ],
+      "sensor": {
+        "kind": "mock",
+        "note": "inclinometer"
+      }
+    },
+    {
+      "nodeName": "Motor_Housing",
+      "role": "motor",
+      "channels": [
+        "motor_current",
+        "vibration"
+      ],
+      "sensor": {
+        "kind": "mock",
+        "note": "current clamp + IMU"
+      }
+    },
+    {
+      "nodeName": "Roller_Front",
+      "role": "roller",
+      "channels": []
+    },
+    {
+      "nodeName": "Roller_Rear",
+      "role": "roller",
+      "channels": []
+    },
+    {
+      "nodeName": "Console_Screen",
+      "role": "console_screen",
+      "channels": []
+    }
+  ]
+}

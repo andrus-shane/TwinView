@@ -1,0 +1,5 @@
+{
+  "source": "mock",
+  "port": 8720,
+  "_comment": "source: 'mock' | 'serial'. For serial, set serialConfigPath to a TabletAutoTest-format treadmill_sensors.json"
+}

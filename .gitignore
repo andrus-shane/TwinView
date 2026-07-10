@@ -1,0 +1,9 @@
+node_modules/
+dist/
+cad/
+*.zip
+*.SLDASM
+*.SLDPRT
+models/*-raw.glb
+.env
+__pycache__/
