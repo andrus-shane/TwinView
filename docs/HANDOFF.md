@@ -18,6 +18,57 @@ Repo: https://github.com/andrus-shane/TwinView (private) — this directory is a
 - Frontend: procedural placeholder treadmill (`web/src/scene/fallback.ts`) with pre-bound rig; click part → bind channels/roles (persists to `models/rig.json` via PUT /api/rig); deck tilts to measured incline (ghost wireframe = commanded, 2× visual exaggeration); belt texture scrolls at measured speed; parts tint amber/red on deviation; mock console canvas is textured onto the 3D console screen; uPlot cmd-vs-meas sparklines per channel.
 - Everything verified end-to-end: scenario run, fault injection → FAIL event → clear → recovery, slider setpoints, bind/save/remove, rig persistence.
 
+## Update 2026-07-13 (old machine, final session) — CAD conversion runbook
+
+Shane installed SolidWorks 2024 on the fast machine, so CAD conversion moves there.
+The conversion was stopped on the old machine at ~95% (all structure unsuppressed +
+fully resolved, mid-tessellation). Everything learned is baked into
+`tools/sw_tessellate_glb.py`, which is now a **one-command, crash-resilient,
+resumable pipeline**. Do NOT use the old machine's models/current.glb — it's a
+known-bad electronics-only export (the app still runs fine on the placeholder).
+
+**Why previous exports produced a "speck field":** the pack-and-go assembly's only
+config has ALL structural parts (deck, 2 m frame rails, covers, motor) **suppressed**,
+and ~1,360 more components open **lightweight**. Suppressed parts are invisible to
+every exporter; lightweight ones have no bodies for tessellation. Both must be fixed
+in-session, and on the old machine SolidWorks crashed every ~2-5 unsuppress rebuilds.
+
+**Runbook on this machine (SW 2024 required):**
+1. `python tools/extract_cad.py` if `cad/NTL99925-1M00/` isn't extracted yet.
+2. `python tools/sw_tessellate_glb.py` — fully autonomous: opens the assembly
+   (silent), unsuppresses structural components biggest-first (skips <0.25 m
+   hardware; Save3 checkpoints every 3 flips so crashes can't undo progress;
+   auto-kills zombie SW and reconnects; poison parts get 2 strikes then a
+   permanent blacklist in `models/_unsuppress_state.json` — committed, already
+   lists `013576-2` and `1001257-1/1001256-1`), then resolves ALL lightweight
+   components silently (`ResolveAllLightWeightComponents(False)` — the `True`
+   variant pops a dialog that aborts under automation), verifies the census
+   is 0, tessellates every resolved part (`body.GetFaces()` +
+   `GetTessTriangles`), and writes `models/NTL99925-raw.glb`.
+   Expect: "Pulled ~1,200+ parts", bbox extent ≈ 0.97 × 1.46 × 2.04 m.
+   (On the old machine: 275 parts = failure mode; 12 min assembly open, ~7 min
+   tessellation. This box should be much faster and may not crash at all.)
+3. `node tools/optimize_glb.mjs` → `models/current.glb` + `models/parts-manifest.json`.
+   Sanity-check before committing: parts manifest should list structural names
+   (1001404, 1001350, 1006376…), not just PCB/STEP electronics; check per-NODE
+   extents, not just scene bbox (a 2 m bbox can come from scattered screws).
+4. Restart the dev server, open :5173 — the app auto-loads current.glb. Bind
+   belt/deck/motor/console_screen roles by clicking parts (see README).
+5. Commit `models/current.glb` + `models/parts-manifest.json` + rig.json and push.
+6. Optional, for a prettier model: after step 2's unsuppress+resolve has run once,
+   `python tools/sw_xr_addin_export.py` uses the XR add-in (GLTF_FileSave_Assembly)
+   which exports WITH materials/colors — the tessellation GLB is uniform gray.
+   The add-in only exports what's displayed, which is why it needed the
+   unsuppress pass first. Watch out: it can take 30+ min and gives no progress.
+
+**Gotchas encoded in the script (don't re-learn):** never hold component/doc COM
+refs across `SetSuppression2` (rebuilds disconnect every dispatch — collect Name2
+strings, refetch via `GetComponentByName`); `IsSuppressed` is True for lightweight
+too (gate on `GetSuppression2 == 0`); the dialog watchdog auto-IDOKs every SW modal
+(needed for Toolbox/What's-Wrong/Open prompts) at 0.4 s poll; Save3 checkpoint makes
+the assembly file grow ~8x (276 MB — too big for GitHub, that's why the resolved
+assembly itself isn't committed).
+
 ## Update 2026-07-10 (second machine, later the same day)
 
 - Dev environment stood up and verified end-to-end with mock data on this machine: Node 24 LTS installed per-user (`%LOCALAPPDATA%\Programs\nodejs`, on user PATH — the MSI needs admin, the zip distribution doesn't), pywin32 installed, `npm install` clean. Verified via API: health, live 10Hz state, quick_check scenario, belt_slip inject → warn → FAIL → clear → recovery events, CSV export (1900+ rows), rig persistence, Vite page serving. Note: both servers bind IPv4/localhost quirks — use `http://localhost:5173` for Vite (it binds ::1) and `http://127.0.0.1:8720` for the API (it binds IPv4 only).

@@ -58,7 +58,7 @@ def start_dialog_watchdog(stop_evt: threading.Event) -> None:
                     win32gui.PostMessage(d, win32con.WM_COMMAND, 1, 0)
             except Exception:
                 pass
-            stop_evt.wait(2)
+            stop_evt.wait(0.4)  # fast poll: dialog-dismiss latency gates unsuppress speed
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -129,115 +129,285 @@ def main() -> int:
     stop_evt = threading.Event()
     start_dialog_watchdog(stop_evt)
 
-    log("Connecting to SolidWorks...")
-    sw = win32com.client.Dispatch("SldWorks.Application")
-    sw.Visible = True
-
-    doc = None
-    try:
-        active = sw.ActiveDoc
-        if active is not None and doc_title(active).lower().startswith(src.stem.lower()):
-            log("Attached to already-open assembly")
-            doc = active
-    except Exception:
-        pass
-    if doc is None:
-        log(f"Opening assembly (silent): {src.name}")
-        t0 = time.time()
-        errs = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        warns = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        doc = sw.OpenDoc6(str(src), SW_DOC_ASSEMBLY, SW_OPEN_SILENT, "", errs, warns)
-        if doc is None:
-            doc = sw.ActiveDoc
-        if doc is None:
-            log("ERROR: assembly failed to open")
-            return 1
-        log(f"Assembly open in {time.time() - t0:.0f}s")
-
-    # Large assemblies open with lightweight components (geometry not loaded),
-    # so GetBodies2 returns None until resolved. This pops a "Resolve Lightweight
-    # Components" modal — the watchdog auto-clicks its OK (IDOK) for us.
-    log("Resolving lightweight components (loads all part geometry — can take minutes)...")
-    tr = time.time()
-    try:
-        doc.ResolveAllLightWeightComponents(True)
-        log(f"Resolve complete in {time.time() - tr:.0f}s")
-    except Exception as e:
-        log(f"ResolveAllLightWeightComponents raised (continuing): {e}")
-
-    # NOTE: don't use prop() for dispatch-returning properties — pywin32 dynamic
-    # dispatch objects are always callable(), so prop() would invoke them.
-    conf = doc.ConfigurationManager.ActiveConfiguration
-    root_comp = conf.GetRootComponent3(True)
-
     # CRITICAL: the big structural parts (deck, frame rails — 2 m) are SUPPRESSED
     # in this config, and GetBodies2 returns nothing for suppressed components.
-    # ResolveAllLightWeightComponents only handles lightweight, NOT suppressed —
-    # so select every suppressed component and unsuppress in one batch rebuild.
+    # ResolveAllLightWeightComponents only handles lightweight, NOT suppressed.
+    # SolidWorks also CRASHES reliably after ~18-20 unsuppress rebuilds on this
+    # assembly, so the harness must make progress durable (Save3 the assembly
+    # every few flips), self-heal (kill zombie SW, reopen, continue), and track
+    # a crash suspect (the in-flight component) via a sidecar file so a genuine
+    # poison part gets blacklisted after crashing twice.
+    import json
+    import subprocess
+
     SW_SUPPRESSED = 0  # swComponentSuppressionState_e.swComponentSuppressed
     SW_RESOLVED = 2    # swComponentSuppressionState_e.swComponentResolved
+    SAVE_EVERY = 3     # flips between Save3 checkpoints (crashes every ~2-5 flips)
+    MIN_EXTENT = 0.25  # m — skip suppressed components smaller than this; crashes
+                       # are the scarce resource, don't spend them on screws
+    STATE_FILE = ROOT / "models" / "_unsuppress_state.json"
 
-    def find_suppressed(comp, acc):
-        try:
-            if comp.GetSuppression2 == SW_SUPPRESSED:
-                acc.append(comp)
-        except Exception:
-            pass
-        kids = comp.GetChildren
-        if kids:
-            for k in kids:
-                find_suppressed(k, acc)
-
-    # Iterative per-component unsuppress: SetSuppression2 acts on one component
-    # and returns a checkable result (batch Select4+EditUnsuppress2 silently did
-    # nothing here). Newly-resolved sub-assemblies come back LIGHTWEIGHT and only
-    # then expose children (which may themselves be suppressed), so alternate
-    # unsuppress rounds with resolve-lightweight passes until a pass finds none.
-    tu = time.time()
-    total_flipped = 0
-    try:
-        sw.CommandInProgress = True  # defer per-call GUI/rebuild overhead
-    except Exception:
-        pass
-    for rnd in range(1, 13):
-        suppressed = []
-        find_suppressed(root_comp, suppressed)
-        if not suppressed:
-            log(f"Unsuppress round {rnd}: none found — done")
-            break
-        flipped = 0
-        for i, comp in enumerate(suppressed):
+    def load_state() -> dict:
+        if STATE_FILE.exists():
             try:
-                comp.SetSuppression2(SW_RESOLVED)
-                if comp.GetSuppression2 != SW_SUPPRESSED:
-                    flipped += 1
+                return json.loads(STATE_FILE.read_text())
             except Exception:
                 pass
-            if (i + 1) % 50 == 0:
-                log(f"  round {rnd}: {i + 1}/{len(suppressed)} processed")
-        total_flipped += flipped
-        log(f"Unsuppress round {rnd}: {flipped}/{len(suppressed)} flipped")
+        return {"blacklist": [], "suspects": {}, "inflight": None}
+
+    def save_state(st: dict) -> None:
+        STATE_FILE.write_text(json.dumps(st, indent=1))
+
+    def sw_procs():
+        import psutil
+        return [p for p in psutil.process_iter(["name"])
+                if p.info["name"] and "SLDWORKS" in p.info["name"].upper()]
+
+    def sw_healthy() -> bool:
+        procs = sw_procs()
+        # a crashed SW lingers as a zombie shell with tiny RSS
+        return bool(procs) and sum(p.memory_info().rss for p in procs) > 500e6
+
+    def kill_sw() -> None:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Stop-Process -Name SLDWORKS -Force -ErrorAction SilentlyContinue"],
+                       capture_output=True)
+        time.sleep(5)
+
+    sw = None
+    doc = None
+
+    def connect(force_new: bool = False):
+        """(Re)connect to SolidWorks and get the assembly open + lightweight-resolved."""
+        nonlocal sw, doc
+        if force_new or not sw_healthy():
+            log("  [heal] killing SolidWorks and reconnecting...")
+            kill_sw()
+        sw = win32com.client.Dispatch("SldWorks.Application")
+        sw.Visible = True
+        doc = None
         try:
-            doc.ResolveAllLightWeightComponents(True)  # sub-asms arrive lightweight
+            active = sw.ActiveDoc
+            if active is not None and doc_title(active).lower().startswith(src.stem.lower()):
+                doc = active
+                log("  attached to open assembly")
+        except Exception:
+            doc = None
+        if doc is None:
+            log(f"  opening assembly (silent): {src.name}")
+            t0 = time.time()
+            errs = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            warns = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            doc = sw.OpenDoc6(str(src), SW_DOC_ASSEMBLY, SW_OPEN_SILENT, "", errs, warns)
+            if doc is None:
+                doc = sw.ActiveDoc
+            if doc is None:
+                raise RuntimeError(f"assembly failed to open (errors={errs.value})")
+            log(f"  assembly open in {time.time() - t0:.0f}s")
+        try:
+            doc.ResolveAllLightWeightComponents(False)
         except Exception:
             pass
-        if flipped == 0:
+        return doc
+
+    def com_alive() -> bool:
+        try:
+            _ = doc.GetTitle
+            return True
+        except Exception:
+            return False
+
+    def fresh_root():
+        return doc.ConfigurationManager.ActiveConfiguration.GetRootComponent3(True)
+
+    def suppressed_names() -> list[str]:
+        """Names (not COM refs) of all currently suppressed components.
+        Name2 is a full path like 'subasm-1/part-1' usable with GetComponentByName."""
+        acc: list[str] = []
+
+        def walk(comp):
+            try:
+                if comp.GetSuppression2 == SW_SUPPRESSED:
+                    nm = comp.Name2
+                    if nm:
+                        acc.append(nm)
+            except Exception:
+                pass
+            try:
+                kids = comp.GetChildren
+            except Exception:
+                return
+            if kids:
+                for k in kids:
+                    walk(k)
+
+        walk(fresh_root())
+        return acc
+
+    def checkpoint_save() -> None:
+        """Persist unsuppressed state into the assembly file so crashes can't
+        undo progress. Save dialogs are dismissed by the watchdog."""
+        errs = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        warns = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        try:
+            rc = doc.Save3(1, errs, warns)  # 1 = swSaveAsOptions_Silent
+            log(f"  checkpoint Save3 rc={rc} errors={errs.value}")
+        except Exception as e:
+            log(f"  checkpoint Save3 raised: {e}")
+
+    # A component whose unsuppress was in-flight during a crash is a suspect;
+    # two strikes = poison, blacklisted for good. Clean failures (call returns
+    # but state stays suppressed, e.g. Toolbox parts missing their size DB)
+    # are blacklisted immediately.
+    state = load_state()
+    if state.get("inflight"):
+        nm = state["inflight"]
+        state["suspects"][nm] = state["suspects"].get(nm, 0) + 1
+        log(f"  [heal] previous run died while unsuppressing {nm!r} "
+            f"(strike {state['suspects'][nm]})")
+        if state["suspects"][nm] >= 2:
+            state["blacklist"].append(nm)
+            log(f"  [heal] {nm!r} blacklisted as poison")
+        state["inflight"] = None
+        save_state(state)
+
+    connect()
+    tu = time.time()
+    total_flipped = 0
+    flips_since_save = 0
+    for rnd in range(1, 25):
+        if not com_alive():
+            connect()
+        unresolvable = set(state["blacklist"])
+        names = suppressed_names()
+        candidates = [n for n in names if n not in unresolvable]
+
+        # Biggest-first: GetBox works on suppressed components (cached bounds),
+        # so spend the limited flips-per-crash budget on structure, not hardware.
+        def extent_of(nm: str) -> float:
+            try:
+                c = doc.GetComponentByName(nm)
+                box = c.GetBox(False, False) if c is not None else None
+                if box and len(box) >= 6:
+                    return max(box[3] - box[0], box[4] - box[1], box[5] - box[2])
+            except Exception:
+                pass
+            return 0.0
+
+        sized = sorted(((extent_of(n), n) for n in candidates), reverse=True)
+        targets = [n for ext, n in sized if ext >= MIN_EXTENT]
+        skipped_small = len(candidates) - len(targets)
+        if not targets:
+            log(f"Unsuppress round {rnd}: no structural components left "
+                f"({skipped_small} small parts and {len(names) - len(candidates)} "
+                f"blacklisted remain suppressed) — done")
+            break
+        log(f"  round {rnd}: {len(targets)} structural targets "
+            f"(largest {sized[0][0]:.2f}m), {skipped_small} small skipped")
+        flipped = 0
+        for i, nm in enumerate(targets):
+            if not com_alive():
+                # crash mid-round: heal and let the next round retry non-suspects
+                if flips_since_save:
+                    log("  [heal] crash cost the unsaved flips since last checkpoint")
+                connect()
+                flips_since_save = 0
+                break
+            state["inflight"] = nm
+            save_state(state)
+            ok = False
+            clean_fail = False
+            try:
+                comp = doc.GetComponentByName(nm)
+                if comp is None:
+                    clean_fail = True
+                else:
+                    comp.SetSuppression2(SW_RESOLVED)
+                    ok = comp.GetSuppression2 != SW_SUPPRESSED
+                    clean_fail = not ok
+            except Exception:
+                # infra failure: crash handling happens at loop top; a live-SW
+                # exception is treated as a suspect strike too
+                state["suspects"][nm] = state["suspects"].get(nm, 0) + 1
+                if state["suspects"][nm] >= 2:
+                    state["blacklist"].append(nm)
+            state["inflight"] = None
+            if ok:
+                flipped += 1
+                flips_since_save += 1
+                if flips_since_save >= SAVE_EVERY:
+                    checkpoint_save()
+                    flips_since_save = 0
+            elif clean_fail and nm not in state["blacklist"]:
+                state["blacklist"].append(nm)
+            save_state(state)
+            if (i + 1) % 25 == 0:
+                log(f"  round {rnd}: {i + 1}/{len(targets)} processed, {flipped} flipped")
+        total_flipped += flipped
+        log(f"Unsuppress round {rnd}: {flipped}/{len(targets)} flipped, "
+            f"{len(state['blacklist'])} blacklisted")
+        if flips_since_save:
+            checkpoint_save()
+            flips_since_save = 0
+        try:
+            doc.ResolveAllLightWeightComponents(False)  # sub-asms arrive lightweight
+        except Exception:
+            pass
+        if flipped == 0 and len(targets) == len(suppressed_names()):
             log("WARNING: remaining suppressed components won't unsuppress; continuing")
             break
-    try:
-        sw.CommandInProgress = False
-    except Exception:
-        pass
+    if not com_alive():
+        connect()
     try:
         doc.ForceRebuild3(False)
     except Exception as e:
         log(f"ForceRebuild3 raised (continuing): {e}")
-    leftover = []
-    find_suppressed(root_comp, leftover)
-    log(f"Unsuppress done in {time.time() - tu:.0f}s: {total_flipped} flipped, {len(leftover)} still suppressed")
+    leftover = suppressed_names()
+    log(f"Unsuppress done in {time.time() - tu:.0f}s: {total_flipped} flipped this run, "
+        f"{len(leftover)} still suppressed")
+    root_comp = fresh_root()
     if root_comp is None:
         log("ERROR: not an assembly / no root component")
         return 1
+
+    # Saved-resolved components reopen LIGHTWEIGHT (SW default for big asms) and
+    # IsSuppressed reports True for lightweight too — so resolve-and-VERIFY here,
+    # or the walk below silently skips all the structure we fought to unsuppress.
+    SW_LIGHTWEIGHT = 1
+
+    def count_lightweight() -> int:
+        n = 0
+
+        def w(c):
+            nonlocal n
+            try:
+                if c.GetSuppression2 == SW_LIGHTWEIGHT:
+                    n += 1
+            except Exception:
+                pass
+            try:
+                kids = c.GetChildren
+            except Exception:
+                return
+            if kids:
+                for k in kids:
+                    w(k)
+
+        w(fresh_root())
+        return n
+
+    for _ in range(4):
+        lw = count_lightweight()
+        log(f"Lightweight components remaining: {lw}")
+        if lw == 0:
+            break
+        try:
+            rc = doc.ResolveAllLightWeightComponents(False)
+            log(f"ResolveAllLightWeightComponents rc={rc}")
+        except Exception as e:
+            log(f"ResolveAllLightWeightComponents raised: {e}")
+        time.sleep(2)
+    root_comp = fresh_root()  # resolve may rebuild; refetch
 
     parts: list[dict] = []
     stats = {"visited": 0, "suppressed": 0, "nogeom": 0}
@@ -251,7 +421,9 @@ def main() -> int:
             return
         stats["visited"] += 1
         try:
-            if prop(comp, "IsSuppressed"):
+            # ONLY skip truly suppressed (state 0) — IsSuppressed would also
+            # skip lightweight components, which is how we lost the structure.
+            if prop(comp, "GetSuppression2") == 0:
                 stats["suppressed"] += 1
                 return
         except Exception:
