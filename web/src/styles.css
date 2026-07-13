@@ -188,3 +188,14 @@ select, input[type='text'], .field input {
 .field > span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
 .check { display: flex; gap: 7px; align-items: center; padding: 2px 0; cursor: pointer; }
 .check input { accent-color: var(--accent); }
+
+/* --- Layers panel --- */
+.layers-panel { margin-bottom: 12px; }
+.layer-row { display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 6px; font-size: 12px; }
+.layer-row:hover { background: var(--panel2); }
+.layer-row .part-meta { margin-left: auto; }
+.layer-row.display-xray .part-name { color: #6ea8d8; }
+.layer-row.display-hidden .part-name { color: var(--muted); text-decoration: line-through; }
+.layer-toggle { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 2px; }
+.layer-presets { display: flex; gap: 6px; }
+.btn.tiny { padding: 1px 8px; font-size: 10px; }

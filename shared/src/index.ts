@@ -74,9 +74,22 @@ export interface RigBinding {
   sensor?: { kind: 'mock' | 'serial'; port?: string; note?: string };
 }
 
+/** How a part group renders: normal, see-through shell, or not at all. */
+export type GroupDisplay = 'solid' | 'xray' | 'hidden';
+
+export const GROUP_DISPLAYS: GroupDisplay[] = ['solid', 'xray', 'hidden'];
+
+export interface PartGroup {
+  name: string;
+  parts: string[];
+  display: GroupDisplay;
+}
+
 export interface RigConfig {
   model: string;
   bindings: RigBinding[];
+  /** Visibility layers — seeded from material heuristics, user-editable. */
+  groups?: PartGroup[];
 }
 
 /** WebSocket messages, server -> client */

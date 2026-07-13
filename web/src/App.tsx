@@ -4,6 +4,7 @@ import { BindDialog } from './components/BindDialog';
 import { Controls } from './components/Controls';
 import { EventLog } from './components/EventLog';
 import { GaugeCard } from './components/GaugeCard';
+import { LayersPanel } from './components/LayersPanel';
 import { PartsPanel } from './components/PartsPanel';
 import { FALLBACK_RIG } from './scene/fallback';
 import { MockConsole } from './scene/mockConsole';
@@ -49,6 +50,8 @@ export function App() {
         if (!glbUrl && rig.bindings.length === 0) {
           for (const b of FALLBACK_RIG.bindings) await store.saveBinding(b);
         }
+        // First run against the CAD model: seed visibility layers from materials
+        if (glbUrl) await store.seedGroups(viewer.getGroupSeeds());
         viewer.applyRig(useStore.getState().rig);
       })
       .catch((e) => setModelLabel(`model load failed: ${e.message}`));
@@ -85,6 +88,7 @@ export function App() {
       </header>
 
       <aside className="left">
+        <LayersPanel />
         <PartsPanel onFocus={(n) => viewerRef.current?.focusOn(n)} />
       </aside>
 

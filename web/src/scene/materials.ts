@@ -39,9 +39,13 @@ const EXPLICIT: Record<string, keyof typeof LIB> = {
 
 const FASTENER_NAME = /screw|bolt|washer|nut|rivet|insert|smd|diode|soic|sot|capae|pcap|edt1|leads|xask|xass|step-1/i;
 
-export function applyCadMaterials(assemblyRoot: THREE.Object3D): void {
-  const cache = new Map<keyof typeof LIB, THREE.MeshStandardMaterial>();
-  const get = (k: keyof typeof LIB): THREE.MeshStandardMaterial => {
+export type PartKind = keyof typeof LIB;
+
+/** Applies materials and returns each part's classification (for layer seeding). */
+export function applyCadMaterials(assemblyRoot: THREE.Object3D): Map<string, PartKind> {
+  const kinds = new Map<string, PartKind>();
+  const cache = new Map<PartKind, THREE.MeshStandardMaterial>();
+  const get = (k: PartKind): THREE.MeshStandardMaterial => {
     let m = cache.get(k);
     if (!m) {
       m = LIB[k]();
@@ -57,7 +61,7 @@ export function applyCadMaterials(assemblyRoot: THREE.Object3D): void {
   for (const part of assemblyRoot.children) {
     if (!part.name || part.name.startsWith('__')) continue;
 
-    let kind: keyof typeof LIB | undefined = EXPLICIT[part.name];
+    let kind: PartKind | undefined = EXPLICIT[part.name];
     if (!kind) {
       bbox.setFromObject(part);
       if (bbox.isEmpty()) continue;
@@ -80,10 +84,41 @@ export function applyCadMaterials(assemblyRoot: THREE.Object3D): void {
       }
     }
 
+    kinds.set(part.name, kind);
     const material = get(kind);
     part.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) mesh.material = material;
     });
   }
+  return kinds;
+}
+
+/** Default visibility layers, seeded from the material classification. */
+export function seedGroups(kinds: Map<string, PartKind>): { name: string; parts: string[]; display: 'solid' }[] {
+  const GROUP_OF: Record<PartKind, string> = {
+    beltRubber: 'Drivetrain',
+    deckBoard: 'Drivetrain',
+    frame: 'Frame & structure',
+    shroud: 'Plastic shells',
+    darkPlastic: 'Console',
+    screenGlass: 'Console',
+    steel: 'Hardware & electronics',
+    accent: 'Brackets & trim',
+  };
+  // Drivetrain explicit parts (rollers/motor classify as steel otherwise)
+  const DRIVETRAIN = new Set(['1000860-1', '1006375-1', '387082-1', '387083-1', '1000901-1']);
+  const byName = new Map<string, string[]>();
+  for (const [part, kind] of kinds) {
+    const group = DRIVETRAIN.has(part) ? 'Drivetrain' : GROUP_OF[kind];
+    let arr = byName.get(group);
+    if (!arr) byName.set(group, (arr = []));
+    arr.push(part);
+  }
+  const ORDER = ['Plastic shells', 'Console', 'Frame & structure', 'Drivetrain', 'Brackets & trim', 'Hardware & electronics'];
+  return ORDER.filter((n) => byName.has(n)).map((name) => ({
+    name,
+    parts: byName.get(name)!.sort(),
+    display: 'solid' as const,
+  }));
 }

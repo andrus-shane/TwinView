@@ -27,10 +27,12 @@ function chevronTexture(): THREE.CanvasTexture {
   g.strokeStyle = '#37e0a0';
   g.lineWidth = 10;
   g.lineCap = 'round';
+  // Apex toward canvas-bottom = texture -v = belt travel direction (rearward),
+  // so the arrows point the way the belt actually moves.
   g.beginPath();
-  g.moveTo(10, 40);
-  g.lineTo(32, 16);
-  g.lineTo(54, 40);
+  g.moveTo(10, 16);
+  g.lineTo(32, 40);
+  g.lineTo(54, 16);
   g.stroke();
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -146,8 +148,16 @@ export class RigAnimator {
     const size = bbox.getSize(new THREE.Vector3());
     const center = bbox.getCenter(new THREE.Vector3());
     const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z));
-    const mat = new THREE.LineBasicMaterial({ color: 0x4ea1ff, transparent: true, opacity: 0.0 });
+    // depthTest off + high renderOrder: the "where it should be" outline must
+    // read THROUGH the machine shell, or it's invisible inside the covers.
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x4ea1ff,
+      transparent: true,
+      opacity: 0.0,
+      depthTest: false,
+    });
     this.ghost = new THREE.LineSegments(geo, mat);
+    this.ghost.renderOrder = 999;
     // Line raycasting uses a fat world-space threshold — an invisible ghost box
     // would swallow every click on the model. Never pickable.
     this.ghost.raycast = () => undefined;
@@ -251,7 +261,7 @@ export class RigAnimator {
       const gap = Math.abs(measIncline - cmdIncline);
       const mat = this.ghost.material as THREE.LineBasicMaterial;
       const active = state.running || state.setpoints.speed > 0 || gap > 0.2;
-      mat.opacity = !active ? 0 : gap > state.channels.incline.warnTol ? 0.55 + 0.3 * Math.sin(this.time * 6) : 0.18;
+      mat.opacity = !active ? 0 : gap > state.channels.incline.warnTol ? 0.75 + 0.25 * Math.sin(this.time * 6) : 0.3;
     }
 
     // status tint + vibration jitter per bound part

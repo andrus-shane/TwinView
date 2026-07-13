@@ -5,8 +5,16 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { RigConfig, TwinState } from '@twinview/shared';
 import { buildFallbackTreadmill } from './fallback';
-import { applyCadMaterials } from './materials';
+import { applyCadMaterials, seedGroups, type PartKind } from './materials';
 import { RigAnimator } from './rig';
+
+const XRAY_MAT = new THREE.MeshBasicMaterial({
+  color: 0x6ea8d8,
+  transparent: true,
+  opacity: 0.09,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
 
 function partNameFor(obj: THREE.Object3D, root: THREE.Object3D): string | null {
   let cur: THREE.Object3D | null = obj;
@@ -37,6 +45,8 @@ export class Viewer {
   private container!: HTMLElement;
   private downAt: { x: number; y: number } | null = null;
   private disposed = false;
+  private partKinds = new Map<string, PartKind>();
+  private assemblyRoot: THREE.Object3D | null = null;
 
   mount(container: HTMLElement): void {
     this.container = container;
@@ -111,8 +121,8 @@ export class Viewer {
       model = gltf.scene;
       this.normalize(model);
       // parts sit under the assembly root group (e.g. "NTL99925")
-      const assemblyRoot = model.children.length === 1 ? model.children[0] : model;
-      applyCadMaterials(assemblyRoot);
+      this.assemblyRoot = model.children.length === 1 ? model.children[0] : model;
+      this.partKinds = applyCadMaterials(this.assemblyRoot);
     } else {
       model = buildFallbackTreadmill();
     }
@@ -185,6 +195,48 @@ export class Viewer {
   applyRig(rig: RigConfig): void {
     this.rig = rig;
     this.animator?.setRig(rig);
+    this.applyGroups(rig.groups ?? []);
+  }
+
+  /** Default layer groups derived from the material classification. */
+  getGroupSeeds(): { name: string; parts: string[]; display: 'solid' }[] {
+    return seedGroups(this.partKinds);
+  }
+
+  /**
+   * Apply layer display modes. X-ray parts render as a faint shell and stop
+   * intercepting clicks, so inner components can be seen AND selected through
+   * them; hidden parts disappear entirely (raycaster skips invisible objects).
+   */
+  private applyGroups(groups: { name: string; parts: string[]; display: string }[]): void {
+    if (!this.assemblyRoot) return;
+    const mode = new Map<string, string>();
+    for (const g of groups) for (const p of g.parts) mode.set(p, g.display);
+
+    // The deck pivot may have reparented parts, so resolve by name model-wide.
+    for (const name of this.partKinds.keys()) {
+      const part = this.modelRoot.getObjectByName(name);
+      if (!part) continue;
+      const m = mode.get(name) ?? 'solid';
+      part.visible = m !== 'hidden';
+      part.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (m === 'xray') {
+          if (!mesh.userData.__solidMat) {
+            mesh.userData.__solidMat = mesh.material;
+            mesh.userData.__solidRaycast = mesh.raycast;
+          }
+          mesh.material = XRAY_MAT;
+          mesh.raycast = () => undefined;
+        } else if (mesh.userData.__solidMat) {
+          mesh.material = mesh.userData.__solidMat;
+          mesh.raycast = mesh.userData.__solidRaycast;
+          delete mesh.userData.__solidMat;
+          delete mesh.userData.__solidRaycast;
+        }
+      });
+    }
   }
 
   setSelected(name: string | null): void {

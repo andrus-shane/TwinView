@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type {
   ChannelId,
   FaultId,
+  GroupDisplay,
+  PartGroup,
   RigBinding,
   RigConfig,
   ScenarioInfo,
@@ -31,6 +33,10 @@ interface Store {
   init(): Promise<void>;
   saveBinding(b: RigBinding): Promise<void>;
   removeBinding(nodeName: string): Promise<void>;
+  seedGroups(groups: PartGroup[]): Promise<void>;
+  setGroupDisplay(name: string, display: GroupDisplay): Promise<void>;
+  setAllGroups(display: GroupDisplay, except?: string[]): Promise<void>;
+  setPartGroup(nodeName: string, groupName: string | null): Promise<void>;
   startScenario(id: string): Promise<void>;
   stopScenario(): Promise<void>;
   setSetpoints(sp: { speed?: number; incline?: number }): Promise<void>;
@@ -83,6 +89,40 @@ export const useStore = create<Store>((set, get) => ({
   removeBinding: async (nodeName) => {
     const rig = structuredClone(get().rig);
     rig.bindings = rig.bindings.filter((x) => x.nodeName !== nodeName);
+    set({ rig });
+    await api('/rig', 'PUT', rig);
+  },
+
+  seedGroups: async (groups) => {
+    const rig = structuredClone(get().rig);
+    if (rig.groups?.length) return; // user's layout already exists
+    rig.groups = groups;
+    set({ rig });
+    await api('/rig', 'PUT', rig);
+  },
+
+  setGroupDisplay: async (name, display) => {
+    const rig = structuredClone(get().rig);
+    const g = rig.groups?.find((x) => x.name === name);
+    if (!g) return;
+    g.display = display;
+    set({ rig });
+    await api('/rig', 'PUT', rig);
+  },
+
+  setAllGroups: async (display, except = []) => {
+    const rig = structuredClone(get().rig);
+    for (const g of rig.groups ?? []) {
+      g.display = except.includes(g.name) ? 'solid' : display;
+    }
+    set({ rig });
+    await api('/rig', 'PUT', rig);
+  },
+
+  setPartGroup: async (nodeName, groupName) => {
+    const rig = structuredClone(get().rig);
+    for (const g of rig.groups ?? []) g.parts = g.parts.filter((p) => p !== nodeName);
+    if (groupName) rig.groups?.find((g) => g.name === groupName)?.parts.push(nodeName);
     set({ rig });
     await api('/rig', 'PUT', rig);
   },

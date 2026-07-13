@@ -19,7 +19,8 @@ const CHANNEL_LABELS: Record<ChannelId, string> = {
 export function BindDialog() {
   const selected = useStore((s) => s.selectedNode);
   const rig = useStore((s) => s.rig);
-  const { saveBinding, removeBinding, select } = useStore.getState();
+  const { saveBinding, removeBinding, select, setPartGroup } = useStore.getState();
+  const partGroup = selected ? rig.groups?.find((g) => g.parts.includes(selected))?.name ?? '' : '';
 
   const existing = rig.bindings.find((b) => b.nodeName === selected);
   const [role, setRole] = useState<RigRole | ''>('');
@@ -75,6 +76,20 @@ export function BindDialog() {
         <span>Sensor note</span>
         <input value={note} placeholder="e.g. hall sensor on front roller" onChange={(e) => setNote(e.target.value)} />
       </label>
+
+      {(rig.groups?.length ?? 0) > 0 && (
+        <label className="field">
+          <span>Visibility layer</span>
+          <select value={partGroup} onChange={(e) => void setPartGroup(selected, e.target.value || null)}>
+            <option value="">— ungrouped —</option>
+            {rig.groups!.map((g) => (
+              <option key={g.name} value={g.name}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <div className="row">
         <button
