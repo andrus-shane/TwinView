@@ -2,7 +2,7 @@
   "model": "NTL99925",
   "bindings": [
     {
-      "nodeName": "Belt",
+      "nodeName": "1000860-1",
       "role": "belt",
       "channels": [
         "belt_speed"
@@ -13,18 +13,18 @@
       }
     },
     {
-      "nodeName": "Deck_Assembly",
+      "nodeName": "1006375-1",
       "role": "deck",
       "channels": [
         "incline"
       ],
       "sensor": {
         "kind": "mock",
-        "note": "inclinometer"
+        "note": "inclinometer on deck board"
       }
     },
     {
-      "nodeName": "Motor_Housing",
+      "nodeName": "1000901-1",
       "role": "motor",
       "channels": [
         "motor_current",
@@ -32,21 +32,21 @@
       ],
       "sensor": {
         "kind": "mock",
-        "note": "current clamp + IMU"
+        "note": "current clamp + IMU on drive motor"
       }
     },
     {
-      "nodeName": "Roller_Front",
+      "nodeName": "387082-1",
       "role": "roller",
       "channels": []
     },
     {
-      "nodeName": "Roller_Rear",
+      "nodeName": "387083-1",
       "role": "roller",
       "channels": []
     },
     {
-      "nodeName": "Console_Screen",
+      "nodeName": "456481-3",
       "role": "console_screen",
       "channels": []
     }

@@ -94,13 +94,59 @@ export class RigAnimator {
           this.setupBelt(object, meshes);
           break;
         case 'roller':
-          this.rollers.push(object);
+          // Spinning rotates around the node's local origin, which only the
+          // fallback model guarantees is the cylinder axis — CAD part origins
+          // are arbitrary, so a "spin" would orbit the part out of the machine.
+          // CAD rollers are hidden under covers anyway; keep them tint-only.
+          if (object.name.startsWith('Roller_')) this.rollers.push(object);
           break;
         case 'console_screen':
-          this.setupConsoleScreen(meshes);
+          this.setupConsoleScreen(object, meshes);
           break;
       }
     }
+    this.groupDeckPlatform();
+  }
+
+  /**
+   * CAD assemblies are flat sibling nodes, so tilting only the bound deck part
+   * would leave the belt/rollers/rails floating. Sweep every part whose bbox
+   * center lies in the deck region into the deck pivot so the whole walking
+   * platform inclines as one. (Fallback model has a proper Deck_Assembly.)
+   */
+  private groupDeckPlatform(): void {
+    if (!this.deckPivot || this.deckPivot.name !== '__deck_pivot__') return;
+    const deckObj = this.parts.find((p) => p.binding.role === 'deck')?.object;
+    if (!deckObj) return;
+
+    const region = new THREE.Box3().setFromObject(deckObj);
+    region.min.x -= 0.12;
+    region.max.x += 0.12;
+    region.min.z -= 0.08; // front roller sits just ahead of the deck board
+    region.max.z += 0.25; // rear roller + end caps
+    region.min.y = Math.min(region.min.y - 0.1, 0);
+    region.max.y += 0.12; // belt wraps above the deck surface
+
+    // Parts live under the assembly root group, not directly under modelRoot.
+    const assemblyRoot = deckObj.parent;
+    if (!assemblyRoot) return;
+
+    const center = new THREE.Vector3();
+    const bb = new THREE.Box3();
+    const toAttach: THREE.Object3D[] = [];
+    for (const child of assemblyRoot.children) {
+      if (child === this.deckPivot || child === this.ghostPivot) continue;
+      if (!child.name || child.name.startsWith('__')) continue;
+      bb.setFromObject(child);
+      if (bb.isEmpty()) continue;
+      bb.getCenter(center);
+      if (region.containsPoint(center)) toAttach.push(child);
+    }
+    // belt flow overlay hovers above the belt — it must tilt with the platform
+    const flow = this.modelRoot.getObjectByName('__belt_flow__');
+    if (flow) toAttach.push(flow);
+
+    for (const o of toAttach) this.deckPivot.attach(o);
   }
 
   private setupDeck(object: THREE.Object3D): void {
@@ -127,6 +173,10 @@ export class RigAnimator {
     const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z));
     const mat = new THREE.LineBasicMaterial({ color: 0x4ea1ff, transparent: true, opacity: 0.0 });
     this.ghost = new THREE.LineSegments(geo, mat);
+    // Line raycasting uses a fat world-space threshold — an invisible ghost box
+    // would swallow every click on the model. Never pickable.
+    this.ghost.raycast = () => undefined;
+    this.ghost.name = '__deck_ghost__';
     this.disposables.push(geo, mat);
 
     this.ghostPivot = new THREE.Object3D();
@@ -172,13 +222,31 @@ export class RigAnimator {
     this.disposables.push(plane.geometry, plane.material as THREE.Material, tex);
   }
 
-  private setupConsoleScreen(meshes: THREE.Mesh[]): void {
+  private setupConsoleScreen(object: THREE.Object3D, meshes: THREE.Mesh[]): void {
     if (!this.consoleTex) return;
-    for (const m of meshes) {
-      const mat = new THREE.MeshBasicMaterial({ map: this.consoleTex, toneMapped: false });
-      this.disposables.push(mat);
-      m.material = mat;
+    const hasUVs = meshes.some((m) => m.geometry.getAttribute('uv'));
+    if (hasUVs) {
+      for (const m of meshes) {
+        const mat = new THREE.MeshBasicMaterial({ map: this.consoleTex, toneMapped: false });
+        this.disposables.push(mat);
+        m.material = mat;
+      }
+      return;
     }
+    // CAD tessellation has no UVs, so a mapped material renders nothing.
+    // Project a screen-sized overlay plane onto the panel's front face instead.
+    const bbox = new THREE.Box3().setFromObject(object);
+    const size = bbox.getSize(new THREE.Vector3());
+    const center = bbox.getCenter(new THREE.Vector3());
+    const mat = new THREE.MeshBasicMaterial({ map: this.consoleTex, toneMapped: false });
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(size.x * 0.94, size.y * 0.9), mat);
+    // the user stands on the deck at +z, so the screen faces +z
+    plane.position.set(center.x, center.y, bbox.max.z + 0.004);
+    plane.name = '__console_screen__';
+    plane.raycast = () => undefined;
+    this.modelRoot.add(plane);
+    this.overlays.push(plane);
+    this.disposables.push(plane.geometry, mat);
   }
 
   update(dt: number, state: TwinState | null): void {
@@ -245,6 +313,17 @@ export class RigAnimator {
   }
 
   private teardown(): void {
+    // Give grouped platform parts back to the assembly before the pivot goes,
+    // or a GUI rebind would silently delete the deck/belt/rollers from scene.
+    if (this.deckPivot && this.deckPivot.name === '__deck_pivot__') {
+      this.deckPivot.rotation.set(0, 0, 0);
+      this.deckPivot.updateMatrixWorld(true);
+      const parent = this.deckPivot.parent ?? this.modelRoot;
+      for (const child of [...this.deckPivot.children]) {
+        if (child.name.startsWith('__')) continue; // overlays are disposed below
+        parent.attach(child);
+      }
+    }
     for (const o of this.overlays) o.parent?.remove(o);
     for (const d of this.disposables) d.dispose();
     this.overlays = [];

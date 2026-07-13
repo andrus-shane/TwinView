@@ -5,6 +5,7 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { RigConfig, TwinState } from '@twinview/shared';
 import { buildFallbackTreadmill } from './fallback';
+import { applyCadMaterials } from './materials';
 import { RigAnimator } from './rig';
 
 function partNameFor(obj: THREE.Object3D, root: THREE.Object3D): string | null {
@@ -109,6 +110,9 @@ export class Viewer {
       const gltf = await loader.loadAsync(url);
       model = gltf.scene;
       this.normalize(model);
+      // parts sit under the assembly root group (e.g. "NTL99925")
+      const assemblyRoot = model.children.length === 1 ? model.children[0] : model;
+      applyCadMaterials(assemblyRoot);
     } else {
       model = buildFallbackTreadmill();
     }

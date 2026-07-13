@@ -56,6 +56,9 @@ export function BindDialog() {
             </option>
           ))}
         </select>
+        <span style={{ fontSize: 11, opacity: 0.65 }}>
+          Role animates the part in 3D (belt scroll, deck tilt, screen feed). Channels only color it by status.
+        </span>
       </label>
 
       <div className="field">
