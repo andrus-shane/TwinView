@@ -60,6 +60,7 @@ export class RigAnimator {
   private consoleTex: THREE.CanvasTexture | null = null;
   private disposables: { dispose(): void }[] = [];
   private overlays: THREE.Object3D[] = [];
+  private wholeMachineTilt = false;
   private time = 0;
 
   constructor(private modelRoot: THREE.Object3D) {}
@@ -105,69 +106,43 @@ export class RigAnimator {
           break;
       }
     }
-    this.groupDeckPlatform();
+    this.attachOverlaysToDeck();
   }
 
-  /**
-   * CAD assemblies are flat sibling nodes, so tilting only the bound deck part
-   * would leave the belt/rollers/rails floating. Sweep every part whose bbox
-   * center lies in the deck region into the deck pivot so the whole walking
-   * platform inclines as one. (Fallback model has a proper Deck_Assembly.)
-   */
-  private groupDeckPlatform(): void {
-    if (!this.deckPivot || this.deckPivot.name !== '__deck_pivot__') return;
-    const deckObj = this.parts.find((p) => p.binding.role === 'deck')?.object;
-    if (!deckObj) return;
-
-    const region = new THREE.Box3().setFromObject(deckObj);
-    region.min.x -= 0.12;
-    region.max.x += 0.12;
-    region.min.z -= 0.08; // front roller sits just ahead of the deck board
-    region.max.z += 0.25; // rear roller + end caps
-    region.min.y = Math.min(region.min.y - 0.1, 0);
-    region.max.y += 0.12; // belt wraps above the deck surface
-
-    // Parts live under the assembly root group, not directly under modelRoot.
-    const assemblyRoot = deckObj.parent;
-    if (!assemblyRoot) return;
-
-    const center = new THREE.Vector3();
-    const bb = new THREE.Box3();
-    const toAttach: THREE.Object3D[] = [];
-    for (const child of assemblyRoot.children) {
-      if (child === this.deckPivot || child === this.ghostPivot) continue;
-      if (!child.name || child.name.startsWith('__')) continue;
-      bb.setFromObject(child);
-      if (bb.isEmpty()) continue;
-      bb.getCenter(center);
-      if (region.containsPoint(center)) toAttach.push(child);
+  /** The belt-flow and console-screen overlay planes hover over machine parts,
+   * so when the whole machine tilts for incline they must ride the pivot too. */
+  private attachOverlaysToDeck(): void {
+    if (!this.deckPivot || !this.wholeMachineTilt) return;
+    for (const nm of ['__belt_flow__', '__console_screen__']) {
+      const o = this.modelRoot.getObjectByName(nm);
+      if (o && o.parent !== this.deckPivot) this.deckPivot.attach(o);
     }
-    // belt flow overlay hovers above the belt — it must tilt with the platform
-    const flow = this.modelRoot.getObjectByName('__belt_flow__');
-    if (flow) toAttach.push(flow);
-
-    for (const o of toAttach) this.deckPivot.attach(o);
   }
 
   private setupDeck(object: THREE.Object3D): void {
-    // Fallback model's Deck_Assembly is already pivoted at the rear; for
-    // arbitrary CAD nodes, wrap in a pivot at the rear-bottom of the bbox.
+    // Fallback model's Deck_Assembly is already pivoted at the rear. For CAD,
+    // tilting just the bound deck part would skewer it through the static
+    // frame — real treadmills incline by lifting the WHOLE machine about its
+    // rear ground contact, so wrap the entire assembly in a rear-bottom pivot.
     if (object.name === 'Deck_Assembly') {
       this.deckPivot = object;
     } else {
-      const bbox = new THREE.Box3().setFromObject(object);
+      let machine: THREE.Object3D = object;
+      while (machine.parent && machine.parent !== this.modelRoot) machine = machine.parent;
+      const mb = new THREE.Box3().setFromObject(machine);
       const pivot = new THREE.Object3D();
       pivot.name = '__deck_pivot__';
-      const parent = object.parent ?? this.modelRoot;
-      pivot.position.set((bbox.min.x + bbox.max.x) / 2, bbox.min.y, bbox.max.z);
-      parent.add(pivot);
-      pivot.attach(object);
+      pivot.position.set((mb.min.x + mb.max.x) / 2, Math.max(mb.min.y, 0), mb.max.z);
+      this.modelRoot.add(pivot);
+      pivot.attach(machine);
       this.deckPivot = pivot;
-      this.overlays.push(pivot); // tracked for teardown
+      this.overlays.push(pivot); // teardown reattaches children, then removes
+      this.wholeMachineTilt = true;
     }
 
-    // Ghost wireframe of the deck at the COMMANDED angle
-    const bbox = new THREE.Box3().setFromObject(this.deckPivot);
+    // Ghost wireframe at the COMMANDED angle — sized to the deck part so it
+    // reads as "where the platform should be", not a machine-sized box.
+    const bbox = new THREE.Box3().setFromObject(object);
     const size = bbox.getSize(new THREE.Vector3());
     const center = bbox.getCenter(new THREE.Vector3());
     const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z));
@@ -264,9 +239,12 @@ export class RigAnimator {
 
     for (const r of this.rollers) r.rotation.x -= measSpeed * dt * 4;
 
-    // deck tilt: measured on the model, commanded on the ghost
-    const measAngle = Math.atan(measIncline / 100) * 2; // exaggerate 2x so it reads visually
-    const cmdAngle = Math.atan(cmdIncline / 100) * 2;
+    // deck tilt: measured on the model, commanded on the ghost. The fallback
+    // tilts only its deck sub-assembly, so it exaggerates 2x to read; the CAD
+    // path tilts the whole machine, where true scale already reads clearly.
+    const gain = this.wholeMachineTilt ? 1 : 2;
+    const measAngle = Math.atan(measIncline / 100) * gain;
+    const cmdAngle = Math.atan(cmdIncline / 100) * gain;
     if (this.deckPivot) this.deckPivot.rotation.x = measAngle;
     if (this.ghostPivot && this.ghost) {
       this.ghostPivot.rotation.x = cmdAngle;
@@ -330,6 +308,7 @@ export class RigAnimator {
     this.disposables = [];
     this.parts = [];
     this.rollers = [];
+    this.wholeMachineTilt = false;
     this.deckPivot = null;
     this.ghostPivot = null;
     this.ghost = null;
