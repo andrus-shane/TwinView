@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tools/sw_tessellate_glb.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python tools/sw_tessellate_glb.py)"
+    ]
+  }
+}

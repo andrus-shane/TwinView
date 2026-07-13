@@ -74,6 +74,7 @@ export class Viewer {
     this.scene.add(ground);
 
     this.scene.add(this.modelRoot);
+    (window as any).__viewer = this;
 
     const ro = new ResizeObserver(() => this.resize());
     ro.observe(container);
@@ -115,7 +116,17 @@ export class Viewer {
       o.castShadow = true;
       o.receiveShadow = true;
       const mesh = o as THREE.Mesh;
-      if (mesh.isMesh && !mesh.geometry.getAttribute('normal')) mesh.geometry.computeVertexNormals();
+      if (!mesh.isMesh) return;
+      if (!mesh.geometry.getAttribute('normal')) mesh.geometry.computeVertexNormals();
+      // Meshopt re-encode drops accessor min/max, so GLTFLoader can't set a valid
+      // bounding sphere — without this the meshes get frustum-culled and vanish.
+      mesh.geometry.computeBoundingSphere();
+      mesh.geometry.computeBoundingBox();
+      // CAD tessellation (GetTessTriangles) has inconsistent triangle winding, so
+      // render double-sided to avoid back-face culling hiding half the surfaces.
+      for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        (m as THREE.Material).side = THREE.DoubleSide;
+      }
     });
     this.modelRoot.add(model);
     this.fitCamera();
@@ -150,11 +161,16 @@ export class Viewer {
     if (bbox.isEmpty()) return;
     const size = bbox.getSize(new THREE.Vector3());
     const center = bbox.getCenter(new THREE.Vector3());
-    const radius = Math.max(size.x, size.y, size.z);
+    // Frame to fit the whole bbox in view given the vertical FOV, with a small margin.
+    const radius = 0.5 * Math.hypot(size.x, size.y, size.z);
+    const fov = (this.camera.fov * Math.PI) / 180;
+    const dist = (radius / Math.sin(fov / 2)) * 0.72;
     this.controls.target.copy(center);
-    this.camera.position.copy(center).add(new THREE.Vector3(radius * 1.1, radius * 0.7, radius * 1.2));
-    this.camera.near = radius / 100;
-    this.camera.far = radius * 20;
+    // three-quarter view from front-right, slightly above (reads well for a treadmill)
+    const dir = new THREE.Vector3(0.85, 0.5, 1).normalize();
+    this.camera.position.copy(center).add(dir.multiplyScalar(dist));
+    this.camera.near = Math.max(0.001, radius / 100);
+    this.camera.far = radius * 40;
     this.camera.updateProjectionMatrix();
   }
 

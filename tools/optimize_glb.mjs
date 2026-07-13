@@ -20,8 +20,9 @@ const input = process.argv[2] ?? join(ROOT, 'models', 'NTL99925-raw.glb');
 const output = process.argv[3] ?? join(ROOT, 'models', 'current.glb');
 const manifestPath = join(ROOT, 'models', 'parts-manifest.json');
 
-/** Parts smaller than this fraction of the model's max dimension get dropped */
-const TINY_PART_RATIO = 0.012;
+/** Drop only parts whose largest dimension is below this fraction of the OVERALL
+ *  model extent — i.e. true micro-hardware, keeping real components for QA binding. */
+const TINY_PART_RATIO = 0.0015;
 
 const io = new NodeIO()
   .registerExtensions([EXTMeshoptCompression])
@@ -48,23 +49,40 @@ function nodeBboxSize(node) {
   return size;
 }
 
-// model max dimension (rough, from all positions)
-let modelMax = 0;
-for (const node of root.listNodes()) modelMax = Math.max(modelMax, nodeBboxSize(node));
-console.log(`Model max part dimension: ${modelMax.toFixed(1)}`);
+// Overall model extent (positions are baked to world space, so a part's accessor
+// min/max IS its world AABB). Union them for the whole-model extent.
+const gmin = [Infinity, Infinity, Infinity];
+const gmax = [-Infinity, -Infinity, -Infinity];
+for (const node of root.listNodes()) {
+  const mesh = node.getMesh();
+  if (!mesh) continue;
+  for (const prim of mesh.listPrimitives()) {
+    const pos = prim.getAttribute('POSITION');
+    if (!pos) continue;
+    const mn = pos.getMinNormalized([]);
+    const mx = pos.getMaxNormalized([]);
+    for (let i = 0; i < 3; i++) {
+      gmin[i] = Math.min(gmin[i], mn[i]);
+      gmax[i] = Math.max(gmax[i], mx[i]);
+    }
+  }
+}
+const overallExtent = Math.max(gmax[0] - gmin[0], gmax[1] - gmin[1], gmax[2] - gmin[2]);
+const threshold = overallExtent * TINY_PART_RATIO;
+console.log(`Overall model extent: ${overallExtent.toFixed(2)} m; dropping parts < ${(threshold * 1000).toFixed(1)} mm`);
 
-// drop tiny parts
+// drop only true hardware (tiny parts)
 let dropped = 0;
 for (const node of root.listNodes()) {
   const mesh = node.getMesh();
   if (!mesh) continue;
   const s = nodeBboxSize(node);
-  if (s > 0 && s < modelMax * TINY_PART_RATIO) {
+  if (s > 0 && s < threshold) {
     node.setMesh(null);
     dropped++;
   }
 }
-console.log(`Dropped ${dropped} tiny parts (< ${(TINY_PART_RATIO * 100).toFixed(1)}% of max dim) — fasteners etc.`);
+console.log(`Dropped ${dropped} tiny parts (< ${(threshold * 1000).toFixed(1)} mm) — fasteners etc.`);
 
 let tris = 0;
 for (const mesh of root.listMeshes())

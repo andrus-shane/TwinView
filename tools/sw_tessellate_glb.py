@@ -1,45 +1,90 @@
-"""Plan C: pull tessellated triangles straight out of the open SolidWorks
-assembly via COM (IFace2::GetTessTriangles) and write a GLB directly — no file
-exporter involved. Slower per-call than a native export but bounded and
-deterministic. Preserves component names and instance transforms.
+"""Plan C: pull SolidWorks' already-computed display tessellation straight out of
+the open assembly via COM (IFace2::GetTessTriangles) and write a GLB directly —
+no file exporter involved. Reads the triangles SolidWorks already has in memory
+for display, so it's bounded (COM round-trips, not re-tessellation) and we
+control the output size. Preserves per-component names and world transforms.
 
-Usage: python tools/sw_tessellate_glb.py [output.glb]
-Requires the assembly to already be open in SolidWorks.
+Usage: python tools/sw_tessellate_glb.py [input.SLDASM] [output.glb]
+Opens the assembly silently if not already open.
 """
-import json
 import struct
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pythoncom
 import win32com.client
+from win32com.client import VARIANT
 
 ROOT = Path(__file__).resolve().parent.parent
+SW_DOC_ASSEMBLY = 2
+SW_OPEN_SILENT = 1
 
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def get_prop(obj, name):
+def doc_title(doc) -> str:
+    t = doc.GetTitle
+    return t if isinstance(t, str) else t()
+
+
+def prop(obj, name):
     v = getattr(obj, name)
     return v() if callable(v) else v
 
 
-def write_glb(out_path: Path, parts: list[dict]) -> None:
-    """parts: [{name, transform(16 float col-major glTF), positions(f32 flat), }]"""
-    bin_chunks = []
-    accessors = []
-    buffer_views = []
-    meshes = []
-    nodes = []
-    offset = 0
+def start_dialog_watchdog(stop_evt: threading.Event) -> None:
+    import win32con, win32gui, win32process, psutil
 
-    for i, p in enumerate(parts):
+    def run() -> None:
+        while not stop_evt.is_set():
+            try:
+                pids = {p.pid for p in psutil.process_iter(["name"])
+                        if p.info["name"] and "SLDWORKS" in p.info["name"].upper()}
+                dlgs = []
+
+                def cb(h, _):
+                    _, pid = win32process.GetWindowThreadProcessId(h)
+                    if pid in pids and win32gui.GetClassName(h) == "#32770" and win32gui.IsWindowVisible(h):
+                        dlgs.append(h)
+                    return True
+
+                win32gui.EnumWindows(cb, None)
+                for d in dlgs:
+                    log(f"  [watchdog] dismissing modal: {win32gui.GetWindowText(d)!r}")
+                    win32gui.PostMessage(d, win32con.WM_COMMAND, 1, 0)
+            except Exception:
+                pass
+            stop_evt.wait(2)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def transform_points(flat_xyz: list[float], m: list[float]) -> list[float]:
+    """Apply a SolidWorks IMathTransform ArrayData (r0..r8 rot, t0..t2 trans, s scale)
+    to a flat [x,y,z,...] list, returning a new flat list in assembly space (meters)."""
+    r = m[0:9]
+    tx, ty, tz = m[9], m[10], m[11]
+    s = m[12] if len(m) > 12 and m[12] else 1.0
+    out = [0.0] * len(flat_xyz)
+    for i in range(0, len(flat_xyz), 3):
+        x, y, z = flat_xyz[i], flat_xyz[i + 1], flat_xyz[i + 2]
+        # SolidWorks stores rotation column-major: point' = R*point*scale + T
+        out[i] = (r[0] * x + r[3] * y + r[6] * z) * s + tx
+        out[i + 1] = (r[1] * x + r[4] * y + r[7] * z) * s + ty
+        out[i + 2] = (r[2] * x + r[5] * y + r[8] * z) * s + tz
+    return out
+
+
+def write_glb(out_path: Path, parts: list[dict]) -> None:
+    bin_chunks, accessors, buffer_views, meshes, nodes = [], [], [], [], []
+    offset = 0
+    for p in parts:
         pos = p["positions"]
         blob = struct.pack(f"<{len(pos)}f", *pos)
-        # pad to 4 bytes
         pad = (-len(blob)) % 4
         bin_chunks.append(blob + b"\x00" * pad)
         count = len(pos) // 3
@@ -50,30 +95,19 @@ def write_glb(out_path: Path, parts: list[dict]) -> None:
             "min": [min(xs), min(ys), min(zs)], "max": [max(xs), max(ys), max(zs)],
         })
         offset += len(blob) + pad
-        meshes.append({
-            "name": p["name"],
-            "primitives": [{"attributes": {"POSITION": len(accessors) - 1}, "material": 0, "mode": 4}],
-        })
-        node = {"name": p["name"], "mesh": len(meshes) - 1}
-        if p.get("matrix"):
-            node["matrix"] = p["matrix"]
-        nodes.append(node)
+        meshes.append({"name": p["name"],
+                       "primitives": [{"attributes": {"POSITION": len(accessors) - 1}, "material": 0, "mode": 4}]})
+        nodes.append({"name": p["name"], "mesh": len(meshes) - 1})
 
-    root_node = {"name": "root", "children": list(range(len(nodes))), "scale": [1, 1, 1]}
-    nodes.append(root_node)
-
+    nodes.append({"name": "NTL99925", "children": list(range(len(nodes)))})
+    import json
     gltf = {
         "asset": {"version": "2.0", "generator": "sw_tessellate_glb"},
-        "scene": 0,
-        "scenes": [{"nodes": [len(nodes) - 1]}],
-        "nodes": nodes,
-        "meshes": meshes,
-        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.64, 0.67, 0.72, 1], "metallicFactor": 0.4, "roughnessFactor": 0.6}}],
-        "accessors": accessors,
-        "bufferViews": buffer_views,
-        "buffers": [{"byteLength": offset}],
+        "scene": 0, "scenes": [{"nodes": [len(nodes) - 1]}], "nodes": nodes, "meshes": meshes,
+        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.64, 0.67, 0.72, 1],
+                                                 "metallicFactor": 0.4, "roughnessFactor": 0.6}}],
+        "accessors": accessors, "bufferViews": buffer_views, "buffers": [{"byteLength": offset}],
     }
-
     json_blob = json.dumps(gltf, separators=(",", ":")).encode()
     json_blob += b" " * ((-len(json_blob)) % 4)
     bin_blob = b"".join(bin_chunks)
@@ -87,76 +121,200 @@ def write_glb(out_path: Path, parts: list[dict]) -> None:
 
 
 def main() -> int:
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "models" / "NTL99925-raw.glb"
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "cad" / "NTL99925-1M00" / "NTL99925-1M00.SLDASM"
+    out = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "models" / "NTL99925-raw.glb"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     pythoncom.CoInitialize()
-    sw = win32com.client.Dispatch("SldWorks.Application")
-    doc = sw.ActiveDoc
-    if doc is None:
-        log("ERROR: no active document in SolidWorks")
-        return 1
+    stop_evt = threading.Event()
+    start_dialog_watchdog(stop_evt)
 
-    conf = get_prop(doc, "ConfigurationManager").ActiveConfiguration
+    log("Connecting to SolidWorks...")
+    sw = win32com.client.Dispatch("SldWorks.Application")
+    sw.Visible = True
+
+    doc = None
+    try:
+        active = sw.ActiveDoc
+        if active is not None and doc_title(active).lower().startswith(src.stem.lower()):
+            log("Attached to already-open assembly")
+            doc = active
+    except Exception:
+        pass
+    if doc is None:
+        log(f"Opening assembly (silent): {src.name}")
+        t0 = time.time()
+        errs = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        warns = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        doc = sw.OpenDoc6(str(src), SW_DOC_ASSEMBLY, SW_OPEN_SILENT, "", errs, warns)
+        if doc is None:
+            doc = sw.ActiveDoc
+        if doc is None:
+            log("ERROR: assembly failed to open")
+            return 1
+        log(f"Assembly open in {time.time() - t0:.0f}s")
+
+    # Large assemblies open with lightweight components (geometry not loaded),
+    # so GetBodies2 returns None until resolved. This pops a "Resolve Lightweight
+    # Components" modal — the watchdog auto-clicks its OK (IDOK) for us.
+    log("Resolving lightweight components (loads all part geometry — can take minutes)...")
+    tr = time.time()
+    try:
+        doc.ResolveAllLightWeightComponents(True)
+        log(f"Resolve complete in {time.time() - tr:.0f}s")
+    except Exception as e:
+        log(f"ResolveAllLightWeightComponents raised (continuing): {e}")
+
+    # NOTE: don't use prop() for dispatch-returning properties — pywin32 dynamic
+    # dispatch objects are always callable(), so prop() would invoke them.
+    conf = doc.ConfigurationManager.ActiveConfiguration
     root_comp = conf.GetRootComponent3(True)
+
+    # CRITICAL: the big structural parts (deck, frame rails — 2 m) are SUPPRESSED
+    # in this config, and GetBodies2 returns nothing for suppressed components.
+    # ResolveAllLightWeightComponents only handles lightweight, NOT suppressed —
+    # so select every suppressed component and unsuppress in one batch rebuild.
+    SW_SUPPRESSED = 0  # swComponentSuppressionState_e.swComponentSuppressed
+    SW_RESOLVED = 2    # swComponentSuppressionState_e.swComponentResolved
+
+    def find_suppressed(comp, acc):
+        try:
+            if comp.GetSuppression2 == SW_SUPPRESSED:
+                acc.append(comp)
+        except Exception:
+            pass
+        kids = comp.GetChildren
+        if kids:
+            for k in kids:
+                find_suppressed(k, acc)
+
+    # Iterative per-component unsuppress: SetSuppression2 acts on one component
+    # and returns a checkable result (batch Select4+EditUnsuppress2 silently did
+    # nothing here). Newly-resolved sub-assemblies come back LIGHTWEIGHT and only
+    # then expose children (which may themselves be suppressed), so alternate
+    # unsuppress rounds with resolve-lightweight passes until a pass finds none.
+    tu = time.time()
+    total_flipped = 0
+    try:
+        sw.CommandInProgress = True  # defer per-call GUI/rebuild overhead
+    except Exception:
+        pass
+    for rnd in range(1, 13):
+        suppressed = []
+        find_suppressed(root_comp, suppressed)
+        if not suppressed:
+            log(f"Unsuppress round {rnd}: none found — done")
+            break
+        flipped = 0
+        for i, comp in enumerate(suppressed):
+            try:
+                comp.SetSuppression2(SW_RESOLVED)
+                if comp.GetSuppression2 != SW_SUPPRESSED:
+                    flipped += 1
+            except Exception:
+                pass
+            if (i + 1) % 50 == 0:
+                log(f"  round {rnd}: {i + 1}/{len(suppressed)} processed")
+        total_flipped += flipped
+        log(f"Unsuppress round {rnd}: {flipped}/{len(suppressed)} flipped")
+        try:
+            doc.ResolveAllLightWeightComponents(True)  # sub-asms arrive lightweight
+        except Exception:
+            pass
+        if flipped == 0:
+            log("WARNING: remaining suppressed components won't unsuppress; continuing")
+            break
+    try:
+        sw.CommandInProgress = False
+    except Exception:
+        pass
+    try:
+        doc.ForceRebuild3(False)
+    except Exception as e:
+        log(f"ForceRebuild3 raised (continuing): {e}")
+    leftover = []
+    find_suppressed(root_comp, leftover)
+    log(f"Unsuppress done in {time.time() - tu:.0f}s: {total_flipped} flipped, {len(leftover)} still suppressed")
     if root_comp is None:
-        log("ERROR: not an assembly")
+        log("ERROR: not an assembly / no root component")
         return 1
 
     parts: list[dict] = []
-    visited = 0
+    stats = {"visited": 0, "suppressed": 0, "nogeom": 0}
     t0 = time.time()
 
-    def visit(comp, depth: int) -> None:
-        nonlocal visited
-        children = comp.GetChildren
-        if callable(children):
-            children = children()
+    def visit(comp) -> None:
+        children = prop(comp, "GetChildren")
         if children:
             for c in children:
-                visit(c, depth + 1)
+                visit(c)
             return
-        # leaf component: grab its body tessellation in component space + transform
-        visited += 1
-        if get_prop(comp, "IsSuppressed"):
-            return
-        name = get_prop(comp, "Name2") or f"comp_{visited}"
+        stats["visited"] += 1
         try:
-            bodies = comp.GetBodies2(0)  # swSolidBody
+            if prop(comp, "IsSuppressed"):
+                stats["suppressed"] += 1
+                return
+        except Exception:
+            pass
+        name = (prop(comp, "Name2") or f"comp_{stats['visited']}").split("/")[-1]
+        try:
+            xform = comp.Transform2
+            m = list(xform.ArrayData) if xform is not None else None
+        except Exception:
+            m = None
+        try:
+            bodies = comp.GetBodies2(0)  # swSolidBody = 0
         except Exception:
             bodies = None
         if not bodies:
+            stats["nogeom"] += 1
             return
         positions: list[float] = []
         for body in bodies:
+            # GetFaces() returns all faces as an array — the GetFirstFace/GetNextFace
+            # linked-list walk isn't reliably exposed on this dynamic dispatch.
             try:
-                face = body.GetFirstFace()
+                faces = body.GetFaces()
             except Exception:
                 continue
-            while face is not None:
+            if not faces:
+                continue
+            for face in faces:
                 try:
-                    tris = face.GetTessTriangles(False)  # component/world coords per False?
+                    tris = face.GetTessTriangles(True)  # True = part-local coords, meters
                     if tris:
                         positions.extend(tris)
                 except Exception:
                     pass
-                nxt = face.GetNextFace
-                face = nxt() if callable(nxt) else nxt
-        if positions:
-            # GetTessTriangles(False) returns assembly-space coords (meters)
-            parts.append({"name": name.split("/")[-1], "positions": positions})
-        if visited % 25 == 0:
-            log(f"  {visited} components, {len(parts)} with geometry, {time.time()-t0:.0f}s")
+        if not positions:
+            stats["nogeom"] += 1
+            return
+        if m:
+            positions = transform_points(positions, m)
+        parts.append({"name": name, "positions": positions})
+        if stats["visited"] % 25 == 0:
+            log(f"  {stats['visited']} comps, {len(parts)} w/ geom, {time.time()-t0:.0f}s")
 
-    log("Traversing assembly components...")
-    visit(root_comp, 0)
-    log(f"Tessellation pulled: {len(parts)} parts in {time.time()-t0:.0f}s")
+    log("Traversing components and pulling tessellation...")
+    visit(root_comp)
+    stop_evt.set()
+    tris = sum(len(p["positions"]) // 9 for p in parts)
+    log(f"Pulled {len(parts)} parts / {tris} triangles in {time.time()-t0:.0f}s "
+        f"(visited {stats['visited']}, suppressed {stats['suppressed']}, no-geom {stats['nogeom']})")
     if not parts:
         log("ERROR: no geometry extracted")
         return 1
 
+    # overall bbox (meters) — sanity check on coordinate handling; treadmill ~2m
+    allx = [v for p in parts for v in p["positions"][0::3]]
+    ally = [v for p in parts for v in p["positions"][1::3]]
+    allz = [v for p in parts for v in p["positions"][2::3]]
+    log(f"bbox (m): x[{min(allx):.2f},{max(allx):.2f}] "
+        f"y[{min(ally):.2f},{max(ally):.2f}] z[{min(allz):.2f},{max(allz):.2f}]  "
+        f"extent {max(allx)-min(allx):.2f} x {max(ally)-min(ally):.2f} x {max(allz)-min(allz):.2f}")
+
     write_glb(out, parts)
-    log(f"Wrote {out} ({out.stat().st_size/1e6:.1f} MB)")
+    log(f"SUCCESS: {out} ({out.stat().st_size/1e6:.1f} MB)")
     return 0
 
 

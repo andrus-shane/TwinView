@@ -115,6 +115,15 @@ app.get('/api/model-info', async () => {
   };
 });
 
+// DEV-ONLY: accept a base64 PNG from the browser and write it to disk so the
+// dev harness can inspect the rendered canvas. Remove before shipping.
+app.post<{ Body: { dataUrl: string } }>('/api/_devshot', async (req) => {
+  const b64 = (req.body?.dataUrl ?? '').replace(/^data:image\/\w+;base64,/, '');
+  const path = join(ROOT, 'models', '_devshot.png');
+  writeFileSync(path, Buffer.from(b64, 'base64'));
+  return { ok: true, bytes: b64.length };
+});
+
 app.get('/api/export.csv', async (_req, reply) => {
   reply
     .header('content-type', 'text/csv')
