@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Server (Fastify :8720)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev:server",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Web (Vite :5173)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev:web",
+      "cwd": "${workspaceFolder}",
+      "serverReadyAction": {
+        "action": "debugWithChrome",
+        "pattern": "Local:.+(https?://\\S+)",
+        "uriFormat": "%s",
+        "webRoot": "${workspaceFolder}/web"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "TwinView (server + web)",
+      "configurations": ["Server (Fastify :8720)", "Web (Vite :5173)"],
+      "stopAll": true
+    }
+  ]
+}

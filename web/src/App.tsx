@@ -6,27 +6,44 @@ import { EventLog } from './components/EventLog';
 import { GaugeCard } from './components/GaugeCard';
 import { LayersPanel } from './components/LayersPanel';
 import { PartsPanel } from './components/PartsPanel';
+import { ThemeMenu } from './components/ThemeMenu';
+import { AdbScreen } from './scene/adbScreen';
 import { FALLBACK_RIG } from './scene/fallback';
 import { MockConsole } from './scene/mockConsole';
 import { Viewer } from './scene/viewer';
 import { useStore } from './state/store';
 import { connectWs } from './state/ws';
+import { applyTheme, initialTheme, initialViewport, saveViewport, viewportCss, type Theme } from './theme';
+
+interface ScreenDevice {
+  serial: string;
+  product: string;
+  model: string;
+}
 
 export function App() {
   const canvasHost = useRef<HTMLDivElement>(null);
   const screenHost = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
+  const mockRef = useRef<MockConsole | null>(null);
   const [modelLabel, setModelLabel] = useState('loading…');
+  const [screens, setScreens] = useState<ScreenDevice[]>([]);
+  // ?screen=<serial> preselects a live console (kiosk/demo links)
+  const [consoleSource, setConsoleSource] = useState(
+    () => new URLSearchParams(location.search).get('screen') ?? 'mock',
+  );
   const connected = useStore((s) => s.connected);
   const hoverRef = useRef<HTMLDivElement>(null);
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [viewport, setViewport] = useState<string>(initialViewport);
 
   useEffect(() => {
     const viewer = new Viewer();
     viewerRef.current = viewer;
     const mockConsole = new MockConsole();
+    mockRef.current = mockConsole;
     viewer.setConsoleCanvas(mockConsole.canvas);
     viewer.mount(canvasHost.current!);
-    screenHost.current?.appendChild(mockConsole.canvas);
 
     viewer.onSelect = (name) => useStore.getState().select(name);
     viewer.onHover = (name) => {
@@ -74,6 +91,38 @@ export function App() {
     };
   }, []);
 
+  // Runs after the mount effect above, so the viewer exists on first pass.
+  useEffect(() => {
+    applyTheme(theme);
+    saveViewport(viewport);
+    viewerRef.current?.setBackground(viewportCss(viewport, theme));
+  }, [theme, viewport]);
+
+  const refreshScreens = () =>
+    void fetch('/api/screens')
+      .then((r) => r.json())
+      .then(setScreens)
+      .catch(() => setScreens([]));
+  useEffect(refreshScreens, []);
+
+  // Console source: the sidebar card and the 3D screen texture share one canvas
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const mock = mockRef.current;
+    const host = screenHost.current;
+    if (!viewer || !mock || !host) return;
+    if (consoleSource === 'mock') {
+      host.replaceChildren(mock.canvas);
+      viewer.setConsoleCanvas(mock.canvas);
+      return;
+    }
+    const live = new AdbScreen(consoleSource);
+    live.connect();
+    host.replaceChildren(live.canvas);
+    viewer.setConsoleCanvas(live.canvas);
+    return () => live.dispose();
+  }, [consoleSource]);
+
   return (
     <div className="app">
       <header>
@@ -84,6 +133,7 @@ export function App() {
         <div className="header-right">
           <span className="model-badge">{modelLabel}</span>
           <span className={`conn ${connected ? 'on' : 'off'}`}>{connected ? '● live' : '○ offline'}</span>
+          <ThemeMenu theme={theme} viewport={viewport} onTheme={setTheme} onViewport={setViewport} />
         </div>
       </header>
 
@@ -103,7 +153,22 @@ export function App() {
       <aside className="right">
         <Controls />
         <div className="card screen-card">
-          <div className="card-title">Console Screen (mock · ADB later)</div>
+          <div className="card-title screen-title">
+            <span>Console Screen</span>
+            <span className="screen-src">
+              <select value={consoleSource} onChange={(e) => setConsoleSource(e.target.value)}>
+                <option value="mock">Mock (twin)</option>
+                {screens.map((d) => (
+                  <option key={d.serial} value={d.serial} title={d.serial}>
+                    {d.product || d.model || 'device'} · …{d.serial.slice(-6)}
+                  </option>
+                ))}
+              </select>
+              <button className="btn" onClick={refreshScreens} title="Rescan adb devices">
+                ↻
+              </button>
+            </span>
+          </div>
           <div className="screen-host" ref={screenHost} />
         </div>
         {CHANNEL_IDS.map((id) => (

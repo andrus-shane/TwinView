@@ -5,6 +5,9 @@ import { chartHistory, useStore } from '../state/store';
 
 const STATUS_LABEL: Record<string, string> = { ok: 'OK', warn: 'WARN', fail: 'FAIL', stale: 'NO DATA' };
 
+// Canvas strokes can't use var(--x) directly, so resolve the theme color at draw time.
+const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888';
+
 export function GaugeCard({ id }: { id: ChannelId }) {
   const ch = useStore((s) => s.twin?.channels[id]);
   const chartRef = useRef<HTMLDivElement>(null);
@@ -23,8 +26,8 @@ export function GaugeCard({ id }: { id: ChannelId }) {
         axes: [{ show: false }, { show: false }],
         series: [
           {},
-          { stroke: '#4ea1ff', width: 1.5, dash: [5, 4] }, // expected
-          { stroke: '#37e0a0', width: 1.5 }, // measured
+          { stroke: () => cssVar('--expected'), width: 1.5, dash: [5, 4] }, // expected
+          { stroke: () => cssVar('--measured'), width: 1.5 }, // measured
         ],
       },
       [[], [], []],
@@ -33,8 +36,11 @@ export function GaugeCard({ id }: { id: ChannelId }) {
     plotRef.current = u;
     const ro = new ResizeObserver(() => u.setSize({ width: el.clientWidth || 280, height: 64 }));
     ro.observe(el);
+    const mo = new MutationObserver(() => u.redraw());
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     return () => {
       ro.disconnect();
+      mo.disconnect();
       u.destroy();
       plotRef.current = null;
     };

@@ -14,6 +14,7 @@ import { MockSource } from './sources/mock.js';
 import { SerialSource, loadSerialConfig } from './sources/serial.js';
 import type { TelemetrySource } from './sources/types.js';
 import { SCENARIOS } from './scenarios.js';
+import { initScreens, listScreenDevices, ScreenStream } from './screens.js';
 import { TwinEngine } from './twin.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,7 @@ interface AppConfig {
   source: 'mock' | 'serial';
   serialConfigPath?: string;
   port: number;
+  scrcpyDir?: string;
 }
 
 const config: AppConfig = existsSync(CONFIG_PATH)
@@ -106,6 +108,9 @@ app.put<{ Body: RigConfig }>('/api/rig', async (req) => {
   return { ok: true };
 });
 
+// Connected adb devices whose screens can be live-streamed to the console
+app.get('/api/screens', async () => listScreenDevices());
+
 app.get('/api/model-info', async () => {
   const glb = join(MODELS_DIR, 'current.glb');
   const manifest = join(MODELS_DIR, 'parts-manifest.json');
@@ -152,12 +157,25 @@ app.register(async (scoped) => {
     socket.send(JSON.stringify({ type: 'state', state: engine.getState() } satisfies ServerMessage));
     socket.on('close', () => sockets.delete(socket));
   });
+
+  // Raw H.264 (Annex-B) from scrcpy-server on the device, one session per viewer
+  scoped.get<{ Params: { serial: string } }>('/ws/screen/:serial', { websocket: true }, (socket, req) => {
+    const stream = new ScreenStream(req.params.serial);
+    socket.on('close', () => stream.stop());
+    stream
+      .start(
+        (chunk) => socket.send(chunk),
+        (reason) => socket.close(1011, reason.slice(0, 120)),
+      )
+      .catch((e: Error) => socket.close(1011, String(e.message).slice(0, 120)));
+  });
 });
 
 engine.onState((state) => broadcast({ type: 'state', state }));
 
 await source.start();
 engine.start();
+await initScreens(config.scrcpyDir);
 
 await app.listen({ port: config.port, host: '127.0.0.1' });
 console.log(`TwinView server on http://127.0.0.1:${config.port} (source: ${source.kind})`);

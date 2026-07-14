@@ -30,15 +30,25 @@ and a twin role. Bindings persist to `models/rig.json`.
    keeps moving to the commanded angle.
 5. Export the session CSV from the event log panel.
 
+## Live console screen (adb + scrcpy)
+
+The Console Screen card has a source picker: **Mock (twin)** renders setpoints client-side; picking a
+connected adb device streams its real screen onto the 3D console and the sidebar card. Pipeline:
+`scrcpy-server` on the device (pushed via adb, `raw_stream=true`) → raw H.264 over
+`/ws/screen/:serial` → WebCodecs `VideoDecoder` in the browser → the same console CanvasTexture.
+~30 fps, sub-second latency, one encoder session per viewer.
+
+Requires scrcpy on the host (`winget install Genymobile.scrcpy`) — auto-detected from PATH or the
+winget install dir, or set `"scrcpyDir"` in `config.json`. `?screen=<serial>` in the URL preselects
+a device (demo links). Chromium-based browser needed for WebCodecs.
+
 ## Real hardware later (mocked now)
 
 - **Sensors** (`server/src/sources/serial.ts`): same architecture and config format as
   TabletAutoTest's `config/treadmill_sensors.json` (`{port, baud, pattern, scale, unit}` per channel,
   regex group 1 = value, shared COM ports supported). Set `config.json` → `"source": "serial"`,
   `"serialConfigPath": "..."`, install `serialport`, wire the port I/O in `SerialSource.start()`.
-- **Console screen**: the mock canvas swaps for TabletAutoTest's LiveView MJPEG stream
-  (`GET :8093/v1/devices/{id}/stream`) — proxy it in `server/src/main.ts` and feed the `<img>` into
-  the same CanvasTexture. Commanded setpoints can be driven through Device Bridge (`:8096`) tap actions.
+- **Commanded setpoints** can be driven through TabletAutoTest's Device Bridge (`:8096`) tap actions.
 
 ## CAD pipeline (SolidWorks → web)
 
