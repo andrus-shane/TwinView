@@ -47,6 +47,9 @@ export class Viewer {
   private disposed = false;
   private partKinds = new Map<string, PartKind>();
   private assemblyRoot: THREE.Object3D | null = null;
+  private bgCss = '#0b0e13';
+  private grid: THREE.GridHelper | null = null;
+  private groundMat!: THREE.ShadowMaterial;
 
   mount(container: HTMLElement): void {
     this.container = container;
@@ -66,7 +69,6 @@ export class Viewer {
     const env = new RoomEnvironment();
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(env, 0.04).texture;
-    this.scene.background = new THREE.Color(0x0b0e13);
 
     const dir = new THREE.DirectionalLight(0xffffff, 1.6);
     dir.position.set(3, 5, 2);
@@ -75,14 +77,11 @@ export class Viewer {
     this.scene.add(dir);
     this.scene.add(new THREE.HemisphereLight(0x8899bb, 0x223, 0.5));
 
-    const grid = new THREE.GridHelper(12, 48, 0x2a3040, 0x1a1f2a);
-    this.scene.add(grid);
-    const ground = new THREE.Mesh(
-      new THREE.CircleGeometry(6, 48).rotateX(-Math.PI / 2),
-      new THREE.ShadowMaterial({ opacity: 0.35 }),
-    );
+    this.groundMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(6, 48).rotateX(-Math.PI / 2), this.groundMat);
     ground.receiveShadow = true;
     this.scene.add(ground);
+    this.applyBackground();
 
     this.scene.add(this.modelRoot);
     (window as any).__viewer = this;
@@ -106,6 +105,37 @@ export class Viewer {
 
   setConsoleCanvas(canvas: HTMLCanvasElement): void {
     this.consoleCanvas = canvas;
+    this.animator?.setConsoleCanvas(canvas);
+  }
+
+  /** Set the viewport background from a '#rrggbb' color; grid and shadow adapt to it. */
+  setBackground(css: string): void {
+    this.bgCss = css;
+    if (this.container) this.applyBackground();
+  }
+
+  /** Grid line colors are baked into vertex colors at construction, so swap the helper out. */
+  private applyBackground(): void {
+    const n = parseInt(this.bgCss.slice(1), 16);
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    const light = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.45;
+    // grid lines nudge toward the opposite pole so they read on any background
+    const mix = (t: number) => {
+      const to = light ? 0 : 255;
+      const ch = (c: number) => Math.round(c + (to - c) * t);
+      return (ch(r) << 16) | (ch(g) << 8) | ch(b);
+    };
+    this.scene.background = new THREE.Color(this.bgCss);
+    if (this.grid) {
+      this.scene.remove(this.grid);
+      this.grid.geometry.dispose();
+      (this.grid.material as THREE.Material).dispose();
+    }
+    this.grid = new THREE.GridHelper(12, 48, mix(light ? 0.24 : 0.17), mix(light ? 0.12 : 0.08));
+    this.scene.add(this.grid);
+    this.groundMat.opacity = light ? 0.22 : 0.35;
   }
 
   /** Load a GLB by URL, or the procedural fallback when url is null. Returns selectable part names. */
@@ -145,14 +175,17 @@ export class Viewer {
     this.modelRoot.add(model);
     this.fitCamera();
 
-    this.animator = new RigAnimator(this.modelRoot);
-    if (this.consoleCanvas) this.animator.setConsoleCanvas(this.consoleCanvas);
-    if (this.rig) this.animator.setRig(this.rig);
-
+    // Collect names BEFORE wiring the rig — setRig reparents platform parts
+    // out of this subtree, which would silently drop them from the list.
     const names = new Set<string>();
     model.traverse((o) => {
       if (o.name && !o.name.startsWith('__')) names.add(o.name);
     });
+
+    this.animator = new RigAnimator(this.modelRoot);
+    if (this.consoleCanvas) this.animator.setConsoleCanvas(this.consoleCanvas);
+    if (this.rig) this.animator.setRig(this.rig);
+
     return [...names].sort((a, b) => a.localeCompare(b));
   }
 

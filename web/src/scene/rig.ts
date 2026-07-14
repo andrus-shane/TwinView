@@ -53,23 +53,34 @@ interface BoundPart {
  */
 export class RigAnimator {
   private parts: BoundPart[] = [];
-  private deckPivot: THREE.Object3D | null = null;
-  private ghostPivot: THREE.Object3D | null = null;
+  private deckPivot: THREE.Object3D | null = null; // fallback model's pre-pivoted deck
+  private platformRearPivot: THREE.Object3D | null = null; // CAD: + grades hinge here
+  private platformFrontPivot: THREE.Object3D | null = null; // CAD: - grades hinge here
+  private platformParts: THREE.Object3D[] = [];
+  private platformParent: THREE.Object3D | null = null;
+  private ghostRearPivot: THREE.Object3D | null = null;
+  private ghostFrontPivot: THREE.Object3D | null = null;
   private ghost: THREE.LineSegments | null = null;
   private beltTexture: THREE.Texture | null = null;
   private beltOverlayTex: THREE.Texture | null = null;
   private rollers: THREE.Object3D[] = [];
   private consoleTex: THREE.CanvasTexture | null = null;
+  private consoleTexSize = { w: 0, h: 0 };
   private disposables: { dispose(): void }[] = [];
   private overlays: THREE.Object3D[] = [];
-  private wholeMachineTilt = false;
   private time = 0;
 
   constructor(private modelRoot: THREE.Object3D) {}
 
   setConsoleCanvas(canvas: HTMLCanvasElement): void {
-    this.consoleTex = new THREE.CanvasTexture(canvas);
-    this.consoleTex.colorSpace = THREE.SRGBColorSpace;
+    if (this.consoleTex) {
+      // swap in place so materials created in setupConsoleScreen keep their map
+      this.consoleTex.image = canvas;
+      this.consoleTex.needsUpdate = true;
+    } else {
+      this.consoleTex = new THREE.CanvasTexture(canvas);
+      this.consoleTex.colorSpace = THREE.SRGBColorSpace;
+    }
   }
 
   setRig(rig: RigConfig): void {
@@ -109,37 +120,37 @@ export class RigAnimator {
       }
     }
     this.attachOverlaysToDeck();
+    // Reparenting under the platform pivots rewrites local positions, so the
+    // vibration rest poses must be captured after the pivots are built.
+    for (const p of this.parts) p.basePos.copy(p.object.position);
   }
 
-  /** The belt-flow and console-screen overlay planes hover over machine parts,
-   * so when the whole machine tilts for incline they must ride the pivot too. */
+  /** The belt-flow overlay plane hovers over the belt, so it must ride the
+   * platform pivots. The console screen overlay stays on the static towers. */
   private attachOverlaysToDeck(): void {
-    if (!this.deckPivot || !this.wholeMachineTilt) return;
-    for (const nm of ['__belt_flow__', '__console_screen__']) {
-      const o = this.modelRoot.getObjectByName(nm);
-      if (o && o.parent !== this.deckPivot) this.deckPivot.attach(o);
-    }
+    if (!this.platformRearPivot) return;
+    const o = this.modelRoot.getObjectByName('__belt_flow__');
+    if (o && o.parent !== this.platformRearPivot) this.platformRearPivot.attach(o);
   }
 
   private setupDeck(object: THREE.Object3D): void {
     // Fallback model's Deck_Assembly is already pivoted at the rear. For CAD,
-    // tilting just the bound deck part would skewer it through the static
-    // frame — real treadmills incline by lifting the WHOLE machine about its
-    // rear ground contact, so wrap the entire assembly in a rear-bottom pivot.
+    // match the physical NTL99925: the console towers stay planted while the
+    // platform assembly (deck, belt, motor tray, hood, side rails) tilts —
+    // positive grades hinge on the REAR ground contact (front lifts on its
+    // incline legs), negative grades hinge on the FRONT contact (the rear of
+    // the walkpad rides up on its casters).
+    // a second deck binding would re-wrap the already-pivoted assembly
+    if (this.deckPivot || this.platformRearPivot) return;
+
+    let frontPos: THREE.Vector3;
+    let rearPos: THREE.Vector3;
     if (object.name === 'Deck_Assembly') {
       this.deckPivot = object;
+      rearPos = object.getWorldPosition(new THREE.Vector3());
+      frontPos = rearPos.clone();
     } else {
-      let machine: THREE.Object3D = object;
-      while (machine.parent && machine.parent !== this.modelRoot) machine = machine.parent;
-      const mb = new THREE.Box3().setFromObject(machine);
-      const pivot = new THREE.Object3D();
-      pivot.name = '__deck_pivot__';
-      pivot.position.set((mb.min.x + mb.max.x) / 2, Math.max(mb.min.y, 0), mb.max.z);
-      this.modelRoot.add(pivot);
-      pivot.attach(machine);
-      this.deckPivot = pivot;
-      this.overlays.push(pivot); // teardown reattaches children, then removes
-      this.wholeMachineTilt = true;
+      ({ frontPos, rearPos } = this.setupPlatformPivots(object));
     }
 
     // Ghost wireframe at the COMMANDED angle — sized to the deck part so it
@@ -164,12 +175,79 @@ export class RigAnimator {
     this.ghost.name = '__deck_ghost__';
     this.disposables.push(geo, mat);
 
-    this.ghostPivot = new THREE.Object3D();
-    this.ghostPivot.position.copy(this.deckPivot.getWorldPosition(new THREE.Vector3()));
-    this.ghost.position.copy(center).sub(this.ghostPivot.position);
-    this.ghostPivot.add(this.ghost);
-    this.modelRoot.add(this.ghostPivot);
-    this.overlays.push(this.ghostPivot);
+    this.ghostFrontPivot = new THREE.Object3D();
+    this.ghostFrontPivot.position.copy(frontPos);
+    this.ghostRearPivot = new THREE.Object3D();
+    this.ghostRearPivot.position.copy(rearPos).sub(frontPos);
+    this.ghost.position.copy(center).sub(rearPos);
+    this.ghostRearPivot.add(this.ghost);
+    this.ghostFrontPivot.add(this.ghostRearPivot);
+    this.modelRoot.add(this.ghostFrontPivot);
+    this.overlays.push(this.ghostFrontPivot);
+  }
+
+  /**
+   * Split the flat CAD assembly into the tilting platform and the static
+   * towers, and hinge the platform on ground-contact pivots at both ends.
+   * Tower parts are the ones that live entirely outboard of the deck (the
+   * column shells and their cladding straddle the walkpad at |x| beyond ~80%
+   * of the machine's half-width) or reach above the platform zone (~30% of
+   * machine height clears the hood/light bar but not the columns, overhead
+   * beams, or console). Everything else — deck, belt, rollers, motor tray,
+   * hood, side rails, end caps — tilts. Validated against the NTL99925 GLB:
+   * the split puts all 770 low inboard parts on the platform and all 588
+   * column/console parts on the towers.
+   */
+  private setupPlatformPivots(deckPart: THREE.Object3D): {
+    frontPos: THREE.Vector3;
+    rearPos: THREE.Vector3;
+  } {
+    const asm = deckPart.parent ?? this.modelRoot;
+    const mb = new THREE.Box3().setFromObject(asm);
+    const cx = (mb.min.x + mb.max.x) / 2;
+    const outboard = 0.8 * ((mb.max.x - mb.min.x) / 2);
+    const lowTopY = mb.min.y + 0.3 * (mb.max.y - mb.min.y);
+
+    const box = new THREE.Box3();
+    const platBox = new THREE.Box3();
+    const platform: THREE.Object3D[] = [];
+    for (const part of [...asm.children]) {
+      if (!part.name || part.name.startsWith('__')) continue;
+      box.setFromObject(part);
+      if (box.isEmpty()) continue;
+      const isTower = box.min.x - cx >= outboard || box.max.x - cx <= -outboard || box.max.y >= lowTopY;
+      if (!isTower) {
+        platform.push(part);
+        platBox.union(box);
+      }
+    }
+    if (platform.length === 0) {
+      // pathological model — tilt at least the bound deck part
+      platform.push(deckPart);
+      platBox.setFromObject(deckPart);
+    }
+
+    const py = Math.max(mb.min.y, 0);
+    const frontPivot = new THREE.Object3D();
+    frontPivot.name = '__platform_pivot_front__';
+    frontPivot.position.set(cx, py, platBox.min.z);
+    const rearPivot = new THREE.Object3D();
+    rearPivot.name = '__platform_pivot_rear__';
+    rearPivot.position.set(0, 0, platBox.max.z - platBox.min.z);
+    frontPivot.add(rearPivot);
+    this.modelRoot.add(frontPivot);
+    for (const part of platform) rearPivot.attach(part);
+
+    this.platformFrontPivot = frontPivot;
+    this.platformRearPivot = rearPivot;
+    this.platformParts = platform;
+    this.platformParent = asm;
+    this.overlays.push(frontPivot); // teardown reattaches parts, then removes
+
+    return {
+      frontPos: frontPivot.position.clone(),
+      rearPos: rearPivot.getWorldPosition(new THREE.Vector3()),
+    };
   }
 
   private setupBelt(object: THREE.Object3D, meshes: THREE.Mesh[]): void {
@@ -250,14 +328,25 @@ export class RigAnimator {
     for (const r of this.rollers) r.rotation.x -= measSpeed * dt * 4;
 
     // deck tilt: measured on the model, commanded on the ghost. The fallback
-    // tilts only its deck sub-assembly, so it exaggerates 2x to read; the CAD
-    // path tilts the whole machine, where true scale already reads clearly.
-    const gain = this.wholeMachineTilt ? 1 : 2;
+    // tilts only its stylized deck sub-assembly, so it exaggerates 2x to read;
+    // the CAD platform tilts at true scale, which already reads clearly.
+    // Positive grades hinge on the rear pivot (front lifts), negative on the
+    // front pivot (rear lifts) — matching the physical machine.
+    const gain = this.deckPivot ? 2 : 1;
     const measAngle = Math.atan(measIncline / 100) * gain;
     const cmdAngle = Math.atan(cmdIncline / 100) * gain;
     if (this.deckPivot) this.deckPivot.rotation.x = measAngle;
-    if (this.ghostPivot && this.ghost) {
-      this.ghostPivot.rotation.x = cmdAngle;
+    if (this.platformRearPivot && this.platformFrontPivot) {
+      this.platformRearPivot.rotation.x = Math.max(0, measAngle);
+      this.platformFrontPivot.rotation.x = Math.min(0, measAngle);
+    }
+    if (this.ghostRearPivot && this.ghostFrontPivot && this.ghost) {
+      if (this.deckPivot) {
+        this.ghostRearPivot.rotation.x = cmdAngle; // fallback: single rear hinge
+      } else {
+        this.ghostRearPivot.rotation.x = Math.max(0, cmdAngle);
+        this.ghostFrontPivot.rotation.x = Math.min(0, cmdAngle);
+      }
       const gap = Math.abs(measIncline - cmdIncline);
       const mat = this.ghost.material as THREE.LineBasicMaterial;
       const active = state.running || state.setpoints.speed > 0 || gap > 0.2;
@@ -297,30 +386,46 @@ export class RigAnimator {
       }
     }
 
-    if (this.consoleTex) this.consoleTex.needsUpdate = true;
+    if (this.consoleTex) {
+      // GL storage is immutable at the first upload's size — when the canvas
+      // resizes (live stream arriving, source switch) dispose so it re-allocs,
+      // else texSubImage2D fails silently and the screen freezes.
+      const img = this.consoleTex.image as HTMLCanvasElement;
+      if (img.width !== this.consoleTexSize.w || img.height !== this.consoleTexSize.h) {
+        this.consoleTex.dispose();
+        this.consoleTexSize = { w: img.width, h: img.height };
+      }
+      this.consoleTex.needsUpdate = true;
+    }
   }
 
   private teardown(): void {
-    // Give grouped platform parts back to the assembly before the pivot goes,
-    // or a GUI rebind would silently delete the deck/belt/rollers from scene.
-    if (this.deckPivot && this.deckPivot.name === '__deck_pivot__') {
-      this.deckPivot.rotation.set(0, 0, 0);
-      this.deckPivot.updateMatrixWorld(true);
-      const parent = this.deckPivot.parent ?? this.modelRoot;
-      for (const child of [...this.deckPivot.children]) {
-        if (child.name.startsWith('__')) continue; // overlays are disposed below
-        parent.attach(child);
-      }
+    // Return jittered parts to their rest pose first, or the reattach below
+    // (and the next setRig's basePos capture) bakes live vibration offsets
+    // into the part's permanent position.
+    for (const p of this.parts) p.object.position.copy(p.basePos);
+    // Give platform parts back to the assembly before the pivots go, or a GUI
+    // rebind would silently delete the deck/belt/rollers from the scene.
+    if (this.platformFrontPivot && this.platformRearPivot && this.platformParent) {
+      this.platformFrontPivot.rotation.set(0, 0, 0);
+      this.platformRearPivot.rotation.set(0, 0, 0);
+      this.platformFrontPivot.updateMatrixWorld(true);
+      for (const part of this.platformParts) this.platformParent.attach(part);
     }
+    if (this.deckPivot) this.deckPivot.rotation.set(0, 0, 0);
     for (const o of this.overlays) o.parent?.remove(o);
     for (const d of this.disposables) d.dispose();
     this.overlays = [];
     this.disposables = [];
     this.parts = [];
     this.rollers = [];
-    this.wholeMachineTilt = false;
     this.deckPivot = null;
-    this.ghostPivot = null;
+    this.platformRearPivot = null;
+    this.platformFrontPivot = null;
+    this.platformParts = [];
+    this.platformParent = null;
+    this.ghostRearPivot = null;
+    this.ghostFrontPivot = null;
     this.ghost = null;
     this.beltTexture = null;
     this.beltOverlayTex = null;
