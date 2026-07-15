@@ -116,7 +116,7 @@
         "Zylux_Airflow_Channel_EVA-PORT_Pad_4-1",
         "Zylux_Airflow_Channel_EVA-PORT_Pad_4-1_1"
       ],
-      "display": "hidden"
+      "display": "solid"
     },
     {
       "name": "Console",

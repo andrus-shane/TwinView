@@ -1,134 +1,163 @@
-"""Compose a ~117s royalty-free 'inspirational tech demo' track as a stereo WAV.
-Warm pads on a I-V-vi-IV progression, plucked arpeggios, soft bass, light
-percussion — layers enter progressively and everything fades for the outro."""
-import struct
+"""Compose an upbeat, running-cadence 'fitness app demo' track as a stereo WAV
+(~117s to match docs/twinview-demo.webm). 130 BPM four-on-the-floor: pumping
+sidechained pads (vi-IV-I-V), off-beat octave bass, 16th-note synth lead,
+kick/clap/hats, with drops timed to the demo's phases and a fade-out ending.
+
+Usage: python tools/make_demo_music.py [out.wav]
+Then:  ffmpeg -i <silent-demo>.webm -i out.wav -map 0:v -map 1:a \
+         -c:v copy -c:a libopus -b:a 96k -shortest scored.webm
+"""
+import sys
 import wave
 
 import numpy as np
 
 SR = 44100
 DUR = 117.1
-BPM = 72
-BEAT = 60 / BPM          # 0.833s
-BAR = 4 * BEAT           # 3.333s
+BPM = 130
+BEAT = 60 / BPM            # 0.4615s
+BAR = 4 * BEAT             # 1.846s
 N = int(SR * DUR)
 t = np.arange(N) / SR
 
-# C major: I  V  vi  IV  ->  C  G  Am  F  (freqs of chord tones, mid register)
-NOTE = lambda semis: 261.63 * 2 ** (semis / 12)  # from C4
+# Song map (bars): energy rises with the demo arc, drums out for the outro.
+BASS_IN = 5 * BAR      # ~9s   machine starts moving
+DRUMS_IN = 9 * BAR     # ~17s  groove starts
+DROP1 = 17 * BAR       # ~31s  side-profile incline: full kit + lead
+DROP2 = 33 * BAR       # ~61s  console close-up / faults: 16th hats, busier lead
+OUTRO = 58 * BAR       # ~107s drums out, pads carry the fade
+
+NOTE = lambda semis: 220.0 * 2 ** (semis / 12)  # from A3
+# vi-IV-I-V in C: Am F C G — the classic "keep running" loop
 CHORDS = [
-    [NOTE(0), NOTE(4), NOTE(7)],     # C:  C E G
-    [NOTE(-5), NOTE(-1), NOTE(2)],   # G:  G B D
-    [NOTE(-3), NOTE(0), NOTE(4)],    # Am: A C E
-    [NOTE(5), NOTE(9), NOTE(12)],    # F:  F A C
+    [NOTE(0), NOTE(3), NOTE(7)],      # Am: A C E
+    [NOTE(-4), NOTE(0), NOTE(3)],     # F:  F A C
+    [NOTE(3), NOTE(7), NOTE(10)],     # C:  C E G
+    [NOTE(-2), NOTE(2), NOTE(5)],     # G:  G B D
 ]
-ROOTS = [NOTE(-12), NOTE(-17), NOTE(-15), NOTE(-7)]  # roots an octave down
+ROOTS = [NOTE(-12), NOTE(-16), NOTE(-9), NOTE(-14)]  # bass roots
 
 mix = np.zeros((N, 2))
+rng = np.random.default_rng(42)
+noise = rng.standard_normal(N)
 
 
-def env_ramp(start, end, attack=0.8, release=1.2):
-    """Envelope that fades a layer in at `start` and out at `end` (seconds)."""
-    e = np.clip((t - start) / attack, 0, 1) * np.clip((end - t) / release, 0, 1)
-    return np.clip(e, 0, 1)
+def seg_env(n, attack_s, release_s):
+    tt = np.arange(n) / SR
+    return np.minimum(tt / attack_s, 1) * np.minimum((n / SR - tt) / release_s, 1)
 
 
-def pluck(freq, at, dur=1.6, amp=0.22, pan=0.0):
-    """Exponentially decaying pluck with a couple of harmonics."""
-    n0 = int(at * SR)
-    n1 = min(int((at + dur) * SR), N)
+def add(n0, seg, pan=0.0):
+    n1 = min(n0 + len(seg), N)
     if n0 >= N:
         return
-    tt = np.arange(n1 - n0) / SR
-    decay = np.exp(-tt * 3.2)
-    wavef = (np.sin(2 * np.pi * freq * tt) * 0.7
-             + np.sin(2 * np.pi * freq * 2 * tt) * 0.18
-             + np.sin(2 * np.pi * freq * 3 * tt) * 0.06)
-    seg = wavef * decay * amp * np.minimum(tt / 0.008, 1)  # click-free attack
+    seg = seg[: n1 - n0]
     left = np.clip(0.5 - pan / 2, 0, 1)
     mix[n0:n1, 0] += seg * left
     mix[n0:n1, 1] += seg * (1 - left)
 
 
-# ---- pads: sustained chords, slow chorus shimmer, whole track ----
-pad_env = env_ramp(0.5, DUR - 1.5, attack=4.0, release=6.0)
+def saw_pluck(freq, dur, amp, bright=6):
+    """Bright saw-ish pluck: summed harmonics with fast decay."""
+    tt = np.arange(int(dur * SR)) / SR
+    w = sum(np.sin(2 * np.pi * freq * k * tt) / k for k in range(1, bright + 1))
+    return w * np.exp(-tt * 9) * np.minimum(tt / 0.004, 1) * amp
+
+
+# ---- pads: sustained chords all the way through ----
 for bar_start in np.arange(0, DUR, BAR):
     ci = int(bar_start / BAR) % 4
     n0 = int(bar_start * SR)
-    n1 = min(int((bar_start + BAR + 0.6) * SR), N)  # slight overlap between bars
-    tt = np.arange(n1 - n0) / SR
-    bar_env = np.minimum(tt / 1.2, 1) * np.minimum((len(tt) / SR - tt) / 0.6, 1)
-    seg = np.zeros(len(tt))
+    n = min(int((BAR + 0.25) * SR), N - n0)
+    if n <= 0:
+        continue
+    tt = np.arange(n) / SR
+    seg = np.zeros(n)
     for f in CHORDS[ci]:
-        for mult, a in ((1, 0.5), (2, 0.12), (0.5, 0.25)):
-            # slow detune between two oscillators = warm chorus
-            seg += a * (np.sin(2 * np.pi * f * mult * tt)
-                        + np.sin(2 * np.pi * f * mult * 1.003 * tt)) / 2
-    seg *= np.clip(bar_env, 0, 1) * 0.10
-    mix[n0:n1, 0] += seg
-    mix[n0:n1, 1] += seg * 0.94  # tiny stereo asymmetry
+        seg += (np.sin(2 * np.pi * f * tt) + np.sin(2 * np.pi * f * 1.004 * tt)
+                + 0.4 * np.sin(2 * np.pi * f * 2 * tt)) / 2.4
+    seg *= seg_env(n, 0.06, 0.12) * 0.115
+    add(n0, seg, pan=0.0)
 
-mix *= pad_env[:, None]  # pads dominate the buffer so far
-
-# ---- bass: soft roots, enters at 13s ----
-bass_env = env_ramp(13, DUR - 4, attack=2.0)
-for bar_start in np.arange(0, DUR, BAR):
-    ci = int(bar_start / BAR) % 4
-    n0 = int(bar_start * SR)
-    n1 = min(int((bar_start + BAR) * SR), N)
-    tt = np.arange(n1 - n0) / SR
-    seg = np.sin(2 * np.pi * ROOTS[ci] * tt) * np.minimum(tt / 0.05, 1) * 0.16
-    mix[n0:n1, 0] += seg * bass_env[n0:n1]
-    mix[n0:n1, 1] += seg * bass_env[n0:n1]
-
-# ---- arpeggio: 8th-note plucks over the chord, enters at 26.7s (bar 8) ----
-arp_start = 8 * BAR
+# ---- off-beat pumping bass: root 8ths, octave jumps ----
 k = 0
-for beat8 in np.arange(arp_start, DUR - 6, BEAT / 2):
-    ci = int(beat8 / BAR) % 4
-    tones = CHORDS[ci] + [CHORDS[ci][0] * 2]
-    freq = tones[k % len(tones)] * (2 if (k % 8) in (3, 7) else 1)
-    pluck(freq, beat8, amp=0.16, pan=0.35 * np.sin(k * 0.7))
+for e8 in np.arange(BASS_IN, OUTRO, BEAT / 2):
+    ci = int(e8 / BAR) % 4
+    f = ROOTS[ci] * (2 if k % 4 == 2 else 1)
+    tt = np.arange(int(BEAT / 2 * SR)) / SR
+    seg = (np.sin(2 * np.pi * f * tt) + 0.3 * np.sin(2 * np.pi * f * 2 * tt))
+    seg *= seg_env(len(seg), 0.006, 0.05) * 0.20
+    add(int(e8 * SR), seg)
     k += 1
 
-# ---- percussion: soft kick + brush hat, enters at 53.3s (bar 16) ----
-perc_start = 16 * BAR
-rng = np.random.default_rng(7)
-noise = rng.standard_normal(N) * 0.5
-for beat in np.arange(perc_start, DUR - 8, BEAT):
-    bi = round((beat % BAR) / BEAT)
+# ---- kick: four on the floor ----
+for beat in np.arange(DRUMS_IN, OUTRO, BEAT):
+    tt = np.arange(int(0.14 * SR)) / SR
+    f = 160 * np.exp(-tt * 22) + 48
+    seg = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt * 17) * 0.5
+    add(int(beat * SR), seg)
+
+# ---- clap/snare on 2 & 4 (from DROP1) ----
+for beat in np.arange(DROP1 + BEAT, OUTRO, 2 * BEAT):
     n0 = int(beat * SR)
-    if bi in (0, 2):  # kick: pitched-down sine thump
-        n1 = min(n0 + int(0.18 * SR), N)
-        tt = np.arange(n1 - n0) / SR
-        f = 95 * np.exp(-tt * 9) + 42
-        seg = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt * 16) * 0.30
-        mix[n0:n1, 0] += seg
-        mix[n0:n1, 1] += seg
-    # brush hat on every beat (soft filtered noise tick)
-    n1 = min(n0 + int(0.05 * SR), N)
-    tt = np.arange(n1 - n0) / SR
-    seg = noise[n0:n1] * np.exp(-tt * 70) * 0.055
-    mix[n0:n1, 0] += seg * 0.8
-    mix[n0:n1, 1] += seg
+    tt = np.arange(int(0.12 * SR)) / SR
+    body = np.sin(2 * np.pi * 185 * tt) * np.exp(-tt * 30) * 0.16
+    snap = noise[n0 : n0 + len(tt)] * np.exp(-tt * 26) * 0.16
+    add(n0, body + snap[: len(body)])
 
-# ---- shimmer: sparse high sparkle notes, final act (from 80s) ----
-for beat in np.arange(80, DUR - 10, BEAT * 2):
-    ci = int(beat / BAR) % 4
-    pluck(CHORDS[ci][int(beat) % 3] * 4, beat + 0.1, dur=2.2, amp=0.05,
-          pan=0.5 * np.sin(beat))
+# ---- hats: off-beat 8ths, then 16ths after DROP2 ----
+for e8 in np.arange(DRUMS_IN + BEAT / 2, OUTRO, BEAT):
+    n0 = int(e8 * SR)
+    tt = np.arange(int(0.045 * SR)) / SR
+    add(n0, noise[n0 : n0 + len(tt)][: len(tt)] * np.exp(-tt * 90) * 0.10, pan=0.25)
+for e16 in np.arange(DROP2, OUTRO, BEAT / 4):
+    n0 = int(e16 * SR)
+    tt = np.arange(int(0.03 * SR)) / SR
+    add(n0, noise[n0 : n0 + len(tt)][: len(tt)] * np.exp(-tt * 120) * 0.05, pan=-0.2)
 
-# ---- master: gentle intro fade-in + 7s outro fade, soft-knee normalize ----
-master = env_ramp(0.0, DUR - 0.2, attack=2.5, release=7.0)
+# ---- lead: 16th-note arp riff (from DROP1, busier after DROP2) ----
+RIFF1 = [0, 2, 1, 2, 0, 2, 1, 3]         # chord-tone indices (3 = octave root)
+RIFF2 = [0, 2, 3, 2, 1, 3, 2, 3]
+k = 0
+for e16 in np.arange(DROP1, OUTRO, BEAT / 2):
+    ci = int(e16 / BAR) % 4
+    tones = CHORDS[ci] + [CHORDS[ci][0] * 2]
+    riff = RIFF2 if e16 >= DROP2 else RIFF1
+    f = tones[riff[k % 8]] * 2
+    add(int(e16 * SR), saw_pluck(f, 0.35, 0.13), pan=0.35 * np.sin(k * 0.9))
+    if e16 >= DROP2:  # extra 16th push
+        add(int((e16 + BEAT / 4) * SR), saw_pluck(f / 2, 0.2, 0.06), pan=-0.2)
+    k += 1
+
+# ---- risers into the drops + crash at the drops ----
+for drop in (DROP1, DROP2):
+    n0 = int((drop - 2 * BAR) * SR)
+    n = int(2 * BAR * SR)
+    tt = np.arange(n) / SR
+    add(n0, noise[n0 : n0 + n][:n] * (tt / tt[-1]) ** 2 * 0.09)
+    ncr = int(1.2 * SR)
+    ttc = np.arange(ncr) / SR
+    add(int(drop * SR), noise[:ncr] * np.exp(-ttc * 5) * 0.17)
+
+# ---- sidechain pump: duck everything to the kick grid once drums start ----
+pump = np.ones(N)
+grid = (t % BEAT) / BEAT
+duck = 1 - 0.5 * np.exp(-grid / 0.12)
+active = (t >= DRUMS_IN) & (t < OUTRO)
+pump[active] = duck[active]
+mix *= pump[:, None]
+
+# ---- master: intro fade-in, 6s outro fade, glue saturation ----
+master = np.minimum(t / 1.5, 1) * np.clip((DUR - 0.2 - t) / 6.0, 0, 1)
 mix *= master[:, None]
-mix = np.tanh(mix * 1.4) * 0.82  # soft saturation glue + headroom
-peak = np.abs(mix).max()
-mix = mix / peak * 0.85
+mix = np.tanh(mix * 1.5) * 0.9
+mix /= np.abs(mix).max() / 0.88
 
+out_path = sys.argv[1] if len(sys.argv) > 1 else 'music.wav'
 out = (mix * 32767).astype('<i2')
-with wave.open(r'demo-video\music.wav', 'wb') as w:
+with wave.open(out_path, 'wb') as w:
     w.setnchannels(2)
     w.setsampwidth(2)
     w.setframerate(SR)
     w.writeframes(out.tobytes())
-print(f'wrote music.wav: {DUR}s, peak {peak:.2f}')
+print(f'wrote {out_path}: {DUR}s @ {BPM} BPM')
