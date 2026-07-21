@@ -1,10 +1,13 @@
 import type { ServerMessage } from '@twinview/shared';
-import { appendHistory, useStore } from './store';
+import { useStore } from './store';
 
 let socket: WebSocket | null = null;
 let retryMs = 500;
 
 export function connectWs(): void {
+  // StrictMode double-mounts the boot effect — a second live socket would
+  // duplicate every event in the lab feed
+  if (socket && socket.readyState <= WebSocket.OPEN) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   socket = new WebSocket(`${proto}://${location.host}/ws/twin`);
 
@@ -15,11 +18,13 @@ export function connectWs(): void {
 
   socket.onmessage = (ev) => {
     const msg = JSON.parse(ev.data) as ServerMessage;
-    if (msg.type === 'state') {
-      appendHistory(msg.state);
-      useStore.getState().setTwin(msg.state);
-    } else if (msg.type === 'rig') {
-      useStore.getState().setRig(msg.rig);
+    const store = useStore.getState();
+    if (msg.type === 'states') store.setStates(msg.states);
+    else if (msg.type === 'event') store.addEvent(msg.event);
+    else if (msg.type === 'fleet') store.setFleet(msg.units, msg.events);
+    else if (msg.type === 'rig') {
+      // model-scoped: the store routes it into rigs[model] (and `rig` if selected)
+      store.setRig(msg.rig);
     }
   };
 

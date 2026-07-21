@@ -1,13 +1,32 @@
 import {
-  CHANNEL_IDS,
+  CHANNELS_BY_KIND,
+  SETPOINT_META,
   type ChannelId,
   type ChannelReading,
   type ChannelStatus,
   type FaultId,
+  type MachineKind,
   type TwinEvent,
   type TwinState,
 } from '@twinview/shared';
-import { stepDrive, motorCurrent, vibrationRms, type DriveState, type Setpoints } from './plant.js';
+import {
+  stepDrive,
+  motorCurrent,
+  vibrationRms,
+  stepRower,
+  rowerPower,
+  stepElliptical,
+  ellipticalPower,
+  ellipticalVibration,
+  stepPilates,
+  pilatesTravel,
+  pilatesPower,
+  type DriveState,
+  type EllipticalState,
+  type PilatesState,
+  type RowerState,
+  type Setpoints,
+} from './plant.js';
 import { SCENARIOS, scenarioSetpoints, type Scenario } from './scenarios.js';
 import type { TelemetrySource } from './sources/types.js';
 
@@ -26,37 +45,141 @@ interface ChannelSpec {
   warnTol: number;
   failTol: number;
   /** Expected value from the fault-free reference plant */
-  expected(drive: DriveState): number;
+  expected(ref: ReferencePlant): number;
 }
 
-const CHANNEL_SPECS: Record<ChannelId, ChannelSpec> = {
-  belt_speed: {
-    label: 'Belt speed',
-    unit: 'mph',
-    warnTol: 0.35,
-    failTol: 0.8,
-    expected: (d) => d.speed,
+/** Every kind's reference state lives side by side; a spec reads its own kind's. */
+interface ReferencePlant {
+  drive: DriveState;
+  rower: RowerState;
+  ell: EllipticalState;
+  pil: PilatesState;
+}
+
+/**
+ * Specs are (kind, channel)-scoped: shared channel ids like incline/vibration/
+ * drive_power carry different expected-value models per machine kind.
+ */
+const CHANNEL_SPECS: Record<MachineKind, Partial<Record<ChannelId, ChannelSpec>>> = {
+  treadmill: {
+    belt_speed: {
+      label: 'Belt speed',
+      unit: 'mph',
+      warnTol: 0.35,
+      failTol: 0.8,
+      expected: (r) => r.drive.speed,
+    },
+    incline: {
+      label: 'Incline',
+      unit: '%',
+      warnTol: 0.5,
+      failTol: 1.5,
+      expected: (r) => r.drive.incline,
+    },
+    motor_current: {
+      label: 'Motor current',
+      unit: 'A',
+      warnTol: 2.0,
+      failTol: 4.5,
+      expected: (r) => motorCurrent(r.drive),
+    },
+    vibration: {
+      label: 'Vibration',
+      unit: 'g RMS',
+      warnTol: 0.15,
+      failTol: 0.35,
+      expected: (r) => vibrationRms(r.drive),
+    },
   },
-  incline: {
-    label: 'Incline',
-    unit: '%',
-    warnTol: 0.5,
-    failTol: 1.5,
-    expected: (d) => d.incline,
+  rower: {
+    stroke_rate: {
+      label: 'Stroke rate',
+      unit: 'spm',
+      warnTol: 1.5,
+      failTol: 4.0,
+      expected: (r) => r.rower.strokeRate,
+    },
+    flywheel_speed: {
+      label: 'Flywheel speed',
+      unit: 'rpm',
+      warnTol: 45,
+      failTol: 110,
+      expected: (r) => r.rower.flywheelRpm,
+    },
+    drive_power: {
+      label: 'Drive power',
+      unit: 'W',
+      warnTol: 12,
+      failTol: 30,
+      expected: (r) => rowerPower(r.rower),
+    },
+    resistance: {
+      label: 'Resistance',
+      unit: 'lvl',
+      warnTol: 0.8,
+      failTol: 2.0,
+      expected: (r) => r.rower.resistance,
+    },
   },
-  motor_current: {
-    label: 'Motor current',
-    unit: 'A',
-    warnTol: 2.0,
-    failTol: 4.5,
-    expected: (d) => motorCurrent(d),
+  elliptical: {
+    stride_rate: {
+      label: 'Stride rate',
+      unit: 'spm',
+      warnTol: 2.0,
+      failTol: 5.0,
+      expected: (r) => r.ell.strideRate,
+    },
+    incline: {
+      label: 'Ramp incline',
+      unit: '%',
+      warnTol: 0.5,
+      failTol: 1.5,
+      expected: (r) => r.ell.incline,
+    },
+    drive_power: {
+      label: 'Drive power',
+      unit: 'W',
+      warnTol: 12,
+      failTol: 30,
+      expected: (r) => ellipticalPower(r.ell),
+    },
+    vibration: {
+      label: 'Vibration',
+      unit: 'g RMS',
+      warnTol: 0.2,
+      failTol: 0.5,
+      expected: (r) => ellipticalVibration(r.ell),
+    },
   },
-  vibration: {
-    label: 'Vibration',
-    unit: 'g RMS',
-    warnTol: 0.15,
-    failTol: 0.35,
-    expected: (d) => vibrationRms(d),
+  pilates: {
+    rep_rate: {
+      label: 'Rep cadence',
+      unit: 'rpm',
+      warnTol: 1.5,
+      failTol: 4.0,
+      expected: (r) => r.pil.repRate,
+    },
+    carriage_travel: {
+      label: 'Carriage travel',
+      unit: 'cm',
+      warnTol: 4.0,
+      failTol: 10.0,
+      expected: (r) => pilatesTravel(r.pil),
+    },
+    drive_power: {
+      label: 'Drive power',
+      unit: 'W',
+      warnTol: 8,
+      failTol: 20,
+      expected: (r) => pilatesPower(r.pil),
+    },
+    resistance: {
+      label: 'Resistance',
+      unit: 'lvl',
+      warnTol: 0.8,
+      failTol: 2.0,
+      expected: (r) => r.pil.resistance,
+    },
   },
 };
 
@@ -73,23 +196,33 @@ interface HistoryRow {
 export class TwinEngine {
   setpoints: Setpoints = { speed: 0, incline: 0 };
 
-  private reference: DriveState = { speed: 0, incline: 0 };
+  private reference: ReferencePlant = {
+    drive: { speed: 0, incline: 0 },
+    rower: { strokeRate: 0, flywheelRpm: 0, resistance: 0 },
+    ell: { strideRate: 0, incline: 0 },
+    pil: { repRate: 0, resistance: 0 },
+  };
+  /** The unit kind's channels — everything below iterates this, not CHANNEL_IDS */
+  private channelIds: ChannelId[];
   private scenario: Scenario | null = null;
   private scenarioStart = 0;
   private events: TwinEvent[] = [];
   private history: HistoryRow[] = [];
-  private status: Record<ChannelId, ChannelStatus> = {
-    belt_speed: 'ok', incline: 'ok', motor_current: 'ok', vibration: 'ok',
-  };
+  private status: Partial<Record<ChannelId, ChannelStatus>> = {};
   private pendingStatus: Partial<Record<ChannelId, { status: ChannelStatus; since: number }>> = {};
   private timer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(s: TwinState) => void>();
+  private eventListeners = new Set<(e: TwinEvent) => void>();
   private lastTick = Date.now();
 
   constructor(
     private source: TelemetrySource,
     private getFaults: () => Record<FaultId, boolean>,
-  ) {}
+    private kind: MachineKind = 'treadmill',
+  ) {
+    this.channelIds = CHANNELS_BY_KIND[kind];
+    for (const id of this.channelIds) this.status[id] = 'ok';
+  }
 
   start(): void {
     if (this.timer) return;
@@ -108,8 +241,17 @@ export class TwinEngine {
     return () => this.listeners.delete(fn);
   }
 
+  onEvent(fn: (e: TwinEvent) => void): () => void {
+    this.eventListeners.add(fn);
+    return () => this.eventListeners.delete(fn);
+  }
+
+  recentEvents(n: number): TwinEvent[] {
+    return this.events.slice(-n);
+  }
+
   startScenario(id: string): boolean {
-    const s = SCENARIOS.find((x) => x.id === id);
+    const s = SCENARIOS.find((x) => x.id === id && x.kind === this.kind);
     if (!s) return false;
     this.scenario = s;
     this.scenarioStart = Date.now();
@@ -124,21 +266,28 @@ export class TwinEngine {
   }
 
   setSetpoints(sp: Partial<Setpoints>): void {
-    if (sp.speed !== undefined) this.setpoints.speed = Math.max(0, Math.min(12, sp.speed));
-    if (sp.incline !== undefined) this.setpoints.incline = Math.max(-3, Math.min(15, sp.incline));
+    const meta = SETPOINT_META[this.kind];
+    if (sp.speed !== undefined) {
+      this.setpoints.speed = Math.max(meta.speed.min, Math.min(meta.speed.max, sp.speed));
+    }
+    if (sp.incline !== undefined) {
+      this.setpoints.incline = Math.max(meta.incline.min, Math.min(meta.incline.max, sp.incline));
+    }
   }
 
   logEvent(channel: ChannelId | 'system', severity: TwinEvent['severity'], msg: string): void {
-    this.events.push({ t: Date.now(), channel, severity, msg });
+    const event: TwinEvent = { t: Date.now(), channel, severity, msg };
+    this.events.push(event);
     if (this.events.length > EVENT_BUFFER) this.events.splice(0, this.events.length - EVENT_BUFFER);
+    for (const fn of this.eventListeners) fn(event);
   }
 
   exportCsv(): string {
-    const header = ['t', ...CHANNEL_IDS.flatMap((c) => [`${c}_cmd`, `${c}_meas`])].join(',');
+    const header = ['t', ...this.channelIds.flatMap((c) => [`${c}_cmd`, `${c}_meas`])].join(',');
     const rows = this.history.map((r) =>
       [
         new Date(r.t).toISOString(),
-        ...CHANNEL_IDS.flatMap((c) => [r.values[c].cmd.toFixed(3), r.values[c].meas.toFixed(3)]),
+        ...this.channelIds.flatMap((c) => [r.values[c].cmd.toFixed(3), r.values[c].meas.toFixed(3)]),
       ].join(','),
     );
     return [header, ...rows].join('\n');
@@ -146,15 +295,15 @@ export class TwinEngine {
 
   getState(): TwinState {
     const now = Date.now();
-    const channels = {} as Record<ChannelId, ChannelReading>;
-    for (const id of CHANNEL_IDS) {
-      const spec = CHANNEL_SPECS[id];
+    const channels: Partial<Record<ChannelId, ChannelReading>> = {};
+    for (const id of this.channelIds) {
+      const spec = CHANNEL_SPECS[this.kind][id]!;
       const sample = this.source.latest(id);
       const stale = !sample || now - sample.t > STALE_MS;
       channels[id] = {
         cmd: spec.expected(this.reference),
         meas: sample?.value ?? 0,
-        status: stale ? 'stale' : this.status[id],
+        status: stale ? 'stale' : this.status[id] ?? 'ok',
         warnTol: spec.warnTol,
         failTol: spec.failTol,
         unit: spec.unit,
@@ -190,12 +339,15 @@ export class TwinEngine {
       }
     }
 
-    // Advance the fault-free reference plant
-    stepDrive(this.reference, this.setpoints, dtS);
+    // Advance the fault-free reference plant for this unit's kind
+    if (this.kind === 'rower') stepRower(this.reference.rower, this.setpoints, dtS);
+    else if (this.kind === 'elliptical') stepElliptical(this.reference.ell, this.setpoints, dtS);
+    else if (this.kind === 'pilates') stepPilates(this.reference.pil, this.setpoints, dtS);
+    else stepDrive(this.reference.drive, this.setpoints, dtS);
 
     // Compare measured vs expected with debounce
-    for (const id of CHANNEL_IDS) {
-      const spec = CHANNEL_SPECS[id];
+    for (const id of this.channelIds) {
+      const spec = CHANNEL_SPECS[this.kind][id]!;
       const sample = this.source.latest(id);
       if (!sample || now - sample.t > STALE_MS) continue;
       const dev = Math.abs(sample.value - spec.expected(this.reference));
@@ -205,9 +357,9 @@ export class TwinEngine {
 
     // History for CSV export
     const values = {} as HistoryRow['values'];
-    for (const id of CHANNEL_IDS) {
+    for (const id of this.channelIds) {
       values[id] = {
-        cmd: CHANNEL_SPECS[id].expected(this.reference),
+        cmd: CHANNEL_SPECS[this.kind][id]!.expected(this.reference),
         meas: this.source.latest(id)?.value ?? NaN,
       };
     }

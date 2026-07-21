@@ -18,7 +18,12 @@ import { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } from 'meshoptimizer
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const input = process.argv[2] ?? join(ROOT, 'models', 'NTL99925-raw.glb');
 const output = process.argv[3] ?? join(ROOT, 'models', 'current.glb');
-const manifestPath = join(ROOT, 'models', 'parts-manifest.json');
+// Per-model manifest lives next to the GLB; 'current.glb' keeps the legacy
+// parts-manifest.json name the app already loads.
+const modelName = process.argv[4] ?? (output.endsWith('current.glb') ? 'NTL99925' : output.replace(/\\/g, '/').split('/').pop().replace(/\.glb$/i, ''));
+const manifestPath = output.endsWith('current.glb')
+  ? join(ROOT, 'models', 'parts-manifest.json')
+  : output.replace(/\.glb$/i, '.manifest.json');
 
 /** Drop only parts whose largest dimension is below this fraction of the OVERALL
  *  model extent — i.e. true micro-hardware, keeping real components for QA binding. */
@@ -108,5 +113,5 @@ await io.write(output, doc);
 
 // manifest of selectable parts
 const names = [...new Set(root.listNodes().map((n) => n.getName()).filter((n) => n && !n.startsWith('__')))].sort();
-writeFileSync(manifestPath, JSON.stringify({ model: 'NTL99925', parts: names }, null, 2));
+writeFileSync(manifestPath, JSON.stringify({ model: modelName, parts: names }, null, 2));
 console.log(`Wrote ${output} + manifest (${names.length} named parts) in ${((Date.now() - t0) / 1000).toFixed(0)}s`);

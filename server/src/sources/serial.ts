@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { SerialPort, ReadlineParser } from 'serialport';
 import type { ChannelId } from '@twinview/shared';
 import type { Sample, TelemetrySource } from './types.js';
 
@@ -15,9 +16,10 @@ import type { Sample, TelemetrySource } from './types.js';
  * Multiple channels may share one physical port (e.g. one Arduino Mega
  * emitting both inclinometer and tachometer lines).
  *
- * STUB: parsing/config plumbing is real; the port I/O activates once the
- * `serialport` package is installed and real hardware is attached
- * (npm i serialport -w server, then wire openPort()).
+ * Opening a port asserts DTR, which resets an Arduino — expect ~2 s of
+ * silence after (re)connect before lines flow. Ports that fail to open or
+ * that disappear (USB unplug) are retried every 3 s; affected channels
+ * simply read stale until the device returns.
  */
 
 export interface SerialChannelSpec {
@@ -47,6 +49,8 @@ export class SerialSource implements TelemetrySource {
 
   private samples = new Map<ChannelId, Sample>();
   private matchers = new Map<ChannelId, { re: RegExp; scale: number }>();
+  private ports = new Map<string, SerialPort>();
+  private stopped = false;
 
   constructor(private config: SerialConfig) {
     for (const [channel, spec] of Object.entries(config)) {
@@ -59,16 +63,52 @@ export class SerialSource implements TelemetrySource {
   }
 
   async start(): Promise<void> {
-    const active = [...this.matchers.keys()];
-    if (active.length === 0) return;
-    // TODO(hardware): open each unique COM port with `serialport` + ReadlineParser,
-    // route lines through ingestLine(). Until then this source reports stale.
-    console.warn(
-      `[serial] configured channels [${active.join(', ')}] but serialport I/O is not wired yet — install hardware and the serialport package`,
-    );
+    if (this.matchers.size === 0) return;
+    const bauds = new Map<string, number>();
+    for (const [channel, spec] of Object.entries(this.config)) {
+      if (!spec || !this.matchers.has(channel as ChannelId)) continue;
+      const prev = bauds.get(spec.port);
+      if (prev !== undefined && prev !== spec.baud) {
+        throw new Error(`serial config: ${spec.port} listed at both ${prev} and ${spec.baud} baud`);
+      }
+      bauds.set(spec.port, spec.baud);
+    }
+    for (const [path, baudRate] of bauds) this.openPort(path, baudRate);
   }
 
-  async stop(): Promise<void> {}
+  private openPort(path: string, baudRate: number): void {
+    if (this.stopped) return;
+    const retry = () => {
+      this.ports.delete(path);
+      if (!this.stopped) setTimeout(() => this.openPort(path, baudRate), 3000);
+    };
+    const port = new SerialPort({ path, baudRate }, (err) => {
+      if (err) {
+        console.warn(`[serial] ${path}: ${err.message} — retrying in 3 s`);
+        retry();
+        return;
+      }
+      console.log(`[serial] ${path} open @ ${baudRate}`);
+    });
+    this.ports.set(path, port);
+    const parser = port.pipe(new ReadlineParser({ delimiter: '\n' }));
+    parser.on('data', (line: string) => this.ingestLine(line.trim()));
+    port.on('error', (err) => console.warn(`[serial] ${path}: ${err.message}`));
+    port.on('close', () => {
+      if (!this.stopped) console.warn(`[serial] ${path} closed — retrying in 3 s`);
+      retry();
+    });
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    await Promise.all(
+      [...this.ports.values()].map(
+        (p) => new Promise<void>((res) => (p.isOpen ? p.close(() => res()) : res())),
+      ),
+    );
+    this.ports.clear();
+  }
 
   /** Feed one raw line from a port; returns the channel it matched, if any. */
   ingestLine(line: string): ChannelId | null {

@@ -41,6 +41,11 @@ const FASTENER_NAME = /screw|bolt|washer|nut|rivet|insert|smd|diode|soic|sot|cap
 
 export type PartKind = keyof typeof LIB;
 
+/** A fresh material instance for a classification — used by the lab-floor LOD merge. */
+export function kindMaterial(kind: PartKind): THREE.MeshStandardMaterial {
+  return LIB[kind]();
+}
+
 /** Applies materials and returns each part's classification (for layer seeding). */
 export function applyCadMaterials(assemblyRoot: THREE.Object3D): Map<string, PartKind> {
   const kinds = new Map<string, PartKind>();

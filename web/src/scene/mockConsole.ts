@@ -1,4 +1,5 @@
-import type { TwinState } from '@twinview/shared';
+import type { MachineKind, TwinState } from '@twinview/shared';
+import { markCanvasFrame } from './canvasFrames';
 
 /**
  * Client-rendered stand-in for the tablet console screen. Later this swaps for
@@ -45,30 +46,50 @@ export class MockConsole {
     g.font = '15px system-ui';
     g.fillStyle = '#5b6b85';
     g.fillText('Start a scenario or set speed/incline', canvas.width / 2, 214);
+    markCanvasFrame(this.canvas);
   }
 
-  draw(state: TwinState): void {
+  draw(state: TwinState, kind: MachineKind = 'treadmill'): void {
     this.bg();
     const { g, canvas } = this;
     const cx = canvas.width / 2;
+    const treadmill = kind === 'treadmill';
+    // level-style secondary axis (L8) vs percentage (8.0%)
+    const leveled = kind === 'rower' || kind === 'pilates';
+    const PRIMARY_UNIT: Record<MachineKind, string> = {
+      treadmill: 'MPH',
+      rower: 'SPM',
+      elliptical: 'SPM',
+      pilates: 'RPM',
+    };
+    const SECONDARY_LABEL: Record<MachineKind, string> = {
+      treadmill: 'INCLINE',
+      rower: 'RESISTANCE',
+      elliptical: 'RAMP',
+      pilates: 'TENSION',
+    };
 
-    // Big speed readout (what the console commands)
+    // Big primary readout (what the console commands): mph or cadence
     g.textAlign = 'center';
     g.font = '700 96px system-ui';
     g.fillStyle = '#f2f6ff';
-    g.fillText(state.setpoints.speed.toFixed(1), cx, 190);
+    g.fillText(treadmill ? state.setpoints.speed.toFixed(1) : state.setpoints.speed.toFixed(0), cx, 190);
     g.font = '600 22px system-ui';
     g.fillStyle = '#7688a8';
-    g.fillText('MPH', cx, 222);
+    g.fillText(PRIMARY_UNIT[kind], cx, 222);
 
-    // Incline (left) and elapsed (right)
+    // Secondary axis (left) and elapsed (right)
     g.font = '700 44px system-ui';
     g.fillStyle = '#dbe4f5';
     g.textAlign = 'center';
-    g.fillText(`${state.setpoints.incline.toFixed(1)}%`, cx - 210, 180);
+    g.fillText(
+      leveled ? `L${state.setpoints.incline.toFixed(0)}` : `${state.setpoints.incline.toFixed(1)}%`,
+      cx - 210,
+      180,
+    );
     g.font = '600 15px system-ui';
     g.fillStyle = '#7688a8';
-    g.fillText('INCLINE', cx - 210, 205);
+    g.fillText(SECONDARY_LABEL[kind], cx - 210, 205);
 
     const mins = Math.floor(state.elapsed / 60);
     const secs = Math.floor(state.elapsed % 60);
@@ -92,5 +113,6 @@ export class MockConsole {
       cx,
       304,
     );
+    markCanvasFrame(this.canvas);
   }
 }

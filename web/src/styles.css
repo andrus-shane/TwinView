@@ -103,6 +103,7 @@ header {
   background: var(--panel2); border: 1px solid var(--border);
   padding: 3px 10px; border-radius: 20px; font-size: 12px; color: var(--muted);
 }
+.model-select { width: auto; max-width: 220px; padding: 3px 8px; font-size: 12px; }
 .conn.on { color: var(--measured); }
 .conn.off { color: var(--fail); }
 
@@ -269,6 +270,85 @@ select, input[type='text'], .field input {
 .swatch-auto { background: linear-gradient(135deg, #0b0e13 50%, #e4e9f1 50%); }
 .swatch-custom { background: conic-gradient(#f87171, #fbbf24, #4ade80, #22d3ee, #818cf8, #f472b6, #f87171); display: inline-block; }
 .swatch-custom input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+/* --- Breadcrumb (drill-down trail over the viewport) --- */
+.breadcrumb {
+  position: absolute; top: 10px; left: 12px; z-index: 6;
+  display: flex; align-items: center; gap: 6px;
+  background: var(--overlay-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px 8px; backdrop-filter: blur(4px);
+}
+.crumb {
+  background: none; border: none; color: var(--accent); cursor: pointer;
+  font-size: 12px; padding: 2px 6px; border-radius: 5px;
+}
+.crumb:hover:not(:disabled) { background: var(--selected-bg); }
+.crumb:disabled { cursor: default; }
+.crumb.current { color: var(--text); font-weight: 600; }
+.crumb-sep { color: var(--muted); font-size: 12px; }
+.breadcrumb ~ .hover-tip { top: 48px; }
+
+/* --- Fleet panel (lab level) --- */
+.unit-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border-radius: 8px; cursor: pointer; user-select: none;
+  border: 1px solid transparent;
+}
+.unit-row:hover { background: var(--panel2); border-color: var(--border); }
+.unit-main { flex: 1; min-width: 0; }
+.unit-title { display: flex; align-items: baseline; gap: 8px; }
+.unit-serial { color: var(--muted); font-size: 11px; }
+.unit-sub { display: flex; gap: 6px; align-items: center; margin-top: 1px; }
+.unit-activity { color: var(--muted); font-size: 11px; }
+.unit-activity.on { color: var(--measured); }
+.auto-chip {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px;
+  opacity: 0.75;
+}
+.auto-chip.live { color: var(--measured); border-color: var(--measured); }
+.auto-chip.kind { color: var(--expected); border-color: var(--expected); }
+.scenario-progress.mini { height: 3px; margin-top: 5px; }
+
+/* --- Lab dashboard (KPIs + detections) --- */
+.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.kpi {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 6px 8px; text-align: center;
+}
+.kpi-num { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kpi-num.accent { color: var(--measured); }
+.kpi-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-top: 2px; }
+.kpi-sub { font-size: 9px; color: var(--muted); margin-top: 1px; opacity: 0.8; }
+.kpi-warn { border-color: var(--warn); }
+.kpi-warn .kpi-num { color: var(--warn-fg); }
+.kpi-fail { border-color: var(--fail); box-shadow: 0 0 10px rgba(220, 38, 38, 0.25); }
+.kpi-fail .kpi-num { color: var(--fail-fg); animation: pulse 1s infinite; }
+
+.detections-card { flex: 1; display: flex; flex-direction: column; min-height: 120px; }
+.detections-card .eventlog-list { flex: 1; min-height: 0; }
+.unit-chip {
+  color: var(--accent); font-size: 11px; font-weight: 600;
+  background: var(--selected-bg); border-radius: 4px; padding: 0 6px;
+  flex-shrink: 0; align-self: flex-start; margin-top: 1px;
+}
+.event.clickable { cursor: pointer; }
+.event.clickable:hover { outline: 1px solid var(--border); }
+
+/* --- Component inspector --- */
+.inspector-name { font-size: 14px; font-weight: 700; word-break: break-all; margin-bottom: 6px; }
+.inspector-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.meta-chip {
+  font-size: 11px; color: var(--muted); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px;
+}
+.meta-chip.role { color: var(--accent); border-color: var(--accent); }
+.meta-chip.note { font-style: italic; }
+.isolate-toggle { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+
+/* --- Controls extras --- */
+.auto-toggle { font-size: 11px; color: var(--accent); text-transform: none; letter-spacing: normal; }
+.auto-note { font-size: 11px; color: var(--accent); margin: -4px 0 8px; opacity: 0.85; }
 
 /* --- Layers panel --- */
 .layers-panel { margin-bottom: 12px; }

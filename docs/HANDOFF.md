@@ -69,6 +69,129 @@ too (gate on `GetSuppression2 == 0`); the dialog watchdog auto-IDOKs every SW mo
 the assembly file grow ~8x (276 MB — too big for GitHub, that's why the resolved
 assembly itself isn't committed).
 
+## Update 2026-07-15 — multi-unit CAD conversion (rower, elliptical, pilates)
+
+Three more units converted with the same pipeline, one SolidWorks session at a time
+(SW COM automation is single-instance; never run two conversions concurrently):
+- `models/FMRW0826-1D30.glb` (rower, 8 MB, 298-part manifest, bbox 0.56×1.36×2.42 m)
+- `models/NTEL71426.glb` (elliptical, 9.3 MB, 470 parts, 0.63×1.80×2.55 m)
+- `models/NTPL99926-6FW0.glb` (pilates, 40 MB, 618 parts, 0.93×0.86×3.04 m)
+Each has a `models/<MODEL>.manifest.json`; `*-raw.glb` intermediates are gitignored
+but left in `models/`. Source pack-and-gos live in `C:\Users\shane.andrus\Documents\CAD Units\`.
+
+Pipeline changes: `sw_tessellate_glb.py` derives the model name from the input stem
+(strips a leading `~`) and keeps a per-assembly sidecar `models/_unsuppress_state_<MODEL>.json`
+(poison-part blacklists must not leak between models — part numbers repeat across product
+lines). `optimize_glb.mjs` derives the manifest path + `model` field from the output
+filename (`current.glb` keeps legacy `parts-manifest.json`/NTL99925 behavior).
+
+Server/web are multi-model: `GET /api/models` discovers `models/*.glb` (excluding `-raw`)
+∪ `*.manifest.json`; `/api/model-info` and `/api/rig` take `?model=`; per-model rigs in
+`models/rig.<MODEL>.json`; header model picker persists to localStorage `twinview.model`.
+
+New gotchas for the pile:
+- Pack-and-go re-stamps every `.SLDASM`/`.SLDDRW` on export (parts copy verbatim) — two
+  exports of the same unit minutes apart differ at the byte level for assemblies, so
+  hash-dedupe across exports only works for parts.
+- The elliptical and pilates roots are literally named `~NTEL71426.SLDASM` /
+  `~NTPL99926-6FW0.SLDASM` — the tilde is part of the filename, not a temp-file marker
+  (SW 2021+ files are not OLE compound docs; don't infer format from headers).
+- Tessellation quiet stretches of 15-25 min with near-idle CPU on BOTH python and SW are
+  normal on single heavy parts. The only real failure signal is the python process exiting.
+  One transient pythoncom hard crash (access violation, no traceback) hit the pilates
+  mid-walk and did not reproduce on retry; after such a crash the script re-attaches to
+  the still-open assembly by title match, skipping the reopen.
+- The 40 MB pilates GLB takes ~30 s through the Vite dev proxy on first load — GLTFLoader
+  has no timeout, but reloading the page mid-fetch logs "CAD load failed … Failed to fetch".
+
+## Update 2026-07-16 — explicit motion groups (rower/elliptical/pilates animations)
+
+The CAD animations no longer rely only on geometric capture heuristics. `RigBinding`
+grew an `attach: string[]` field (shared/src/index.ts): the exact scene-node names that
+ride a bound part's animation as one rigid group. `RigAnimator` uses authored lists for
+seat sleds, handles, pedals, arms, and carriages (capture-box heuristics remain the
+fallback for un-annotated rigs). Two new roles: `crank` (spins about the bound part's
+thinnest axis, absolute angle phase-locked to the pedal stride) and `spring` (reformer
+coils scale along z from a pivot at their housing-anchored end, tracking the carriage).
+The lists were derived from per-part world AABBs dumped out of the GLBs (accessor
+min/max — positions are world-space in these exports) and are checked into the three
+`models/rig.<MODEL>.json` files (~430 grouped parts total).
+
+Findings encoded there (don't re-derive):
+- The rower rig used to bind the WRONG seat pad: `434166-1` is the handle-rest cradle —
+  a full second carriage assembly parked mid-rail at z≈-0.85. The sliding seat is
+  `434166-1_1` (wheels/bearings cluster at z≈-1.34). Rebound.
+- The elliptical's big visible discs (`393296-*` stack, weight plates, rivets) are
+  bolted to the crank (pin grommets at the crank-pin radius), so they're role `crank`
+  now — at the geared `flywheel` rate they'd shear against the crank arms. The true
+  inertia flywheel is an internal cluster around `364315-1`, left static (invisible).
+- Elliptical arms are bell-cranks: the physical hinge is at the pole BOTTOM (shaft
+  `391145-1`, y≈1.0), not the pole top. `RigAnimator.armHinge` finds it from the
+  attach-list clamshells/bearings that wrap the pole's bottom end.
+- Pedal ellipse phases are solved from each pedal's CAD rest offset (the snapshot
+  freezes the mechanism mid-stride) — kills the snap-to-ellipse jump at focus and
+  keeps the crank pins on the pedals' clock.
+- BindDialog preserves `attach` through UI edits (it used to rebuild bindings from
+  scratch, which would have silently dropped the lists).
+
+Known-static approximations (visible if you look for them): the rower pull strap
+`434212-1` (modeled fully extended along the rail) and upper spool-pulley cluster; the
+reformer ropes `RX1574-*` (full-rail meshes; the hand-loops ride the carriage as an
+approximation); elliptical left ramp rail `1002284-1` isn't in the incline binding.
+All would need path/stretch animations, not rigid groups.
+
+## Update 2026-07-17 — animation defect diagnosis (recorded evidence)
+
+Recorded each machine mid-scenario (16 timestamped frames + webm each, Playwright) and
+ran a frame-analysis + adversarial-verify pass, then live scene-graph introspection via
+`window.__viewer`. Verified facts, in fix priority order:
+
+**Rower — the rig binds the wrong parts (inherited from the original hand-authored rig):**
+- `361660-1` ("handle", note "handle load cell") is actually the SEAT CUSHION — a
+  0.30×0.06×0.25 molded pad, confirmed visually via X-ray isolate. It rides the 0.8 m
+  handle slide, so the cushion detaches from its own carriage every stroke.
+- The rail carries TWO seat carriages ~0.5 m apart (CAD duplicate; the rear one is a
+  "New_*"-prefixed design revision with no cushion). The seat binding (`434166-1_1`,
+  rebound 2026-07-16) drives the REAR headless carriage; the FRONT carriage under the
+  cushion stays parked. Three clusters move/don't-move independently — kinematic nonsense
+  that happens to read as "a seat sliding" from afar.
+- Fix: one seat group = cushion `361660-1` + trim `363661-1` + plate `434166-1` + the
+  front-carriage rollers/hardware, anchor 0 (CAD pose = catch); hide the rear duplicate
+  carriage via a hidden display group; identify the real handlebar node (unknown — maybe
+  not a distinct part) before re-adding a handle binding.
+- NOT defects: flywheel `448374-1` does spin (verified via pivot rotation + isolate) but
+  is a featureless disc behind the shrouds — invisible; the shroud's vaned face is
+  correctly static. Seat "salmon tint" during runs = drive_power warn tint on the
+  cushion (works as designed, reads oddly because the cushion is mis-bound).
+
+**Elliptical — rigid-translation approximation visibly breaks at three joints (all real):**
+- Crank pin / crank arm / pedal-arm rear never touch; the gap rotates with the crank
+  (pedal ellipse y-amplitude 0.07 vs crank-pin circle r≈0.19).
+- Pole-bottom clamshells + lower-link clevis float free through most of the swing,
+  reseating at the low phase (link-bottom sweep 0.16 m vs arm-point sweep 0.24 m).
+- Ramp rollers lift ~a pedal-height off the incline rail each cycle.
+- Fix direction: two-body pedal-arm model — translate the arm group by the crank-pin
+  offset (full r=0.19 circle), pitch about the pin so the roller end stays on the ramp;
+  solve arm-swing amplitude/phase from hinge→link-bottom distance instead of fixed 0.22.
+- NOT a defect: "doesn't return to rest" — stride decays <2 spm in ~8 s and the glide
+  settles to the CAD pose (±2 mm) by ~10-15 s; the recording's rest frame was just early.
+
+**Pilates — two rope artifacts (real, cosmetic-to-wrong):**
+- Rope-end stops (RX1566/RX1567, static tray hardware) visually coincide with the
+  carriage grips at rest, then hang mid-air/clip into the pad as the carriage leaves.
+  Fix option: move the 4 end-stop nodes (+ their RX990033 screws) into the carriage
+  attach so hooks travel with the loops (leaves a subtle static-rope-to-hook gap).
+- Static rope mesh RX1574 cantilevers ~0.4 m past the head end with a floating T fitting
+  (rope modeled straight/parked). Option: hide ropes + fittings via a hidden group.
+- Everything else verified correct: carriage sled rigid, springs stretch/relax tracking
+  the carriage with no detachment, cosine profile at telemetry rate, rest recovery exact.
+
+**Capture lessons (bake into future recordings):** Playwright screenshot overhead adds
+~150 ms/frame — timestamp every frame and compute rates from timestamps or the webm,
+never from nominal step; machines stopping from high rates need 20+ s before the "rest"
+frame; agents analyzing stills WILL misattribute occluded/overlapping movers — verify
+against the live scene graph (`window.__viewer` hook) before trusting frame findings.
+
 ## Update 2026-07-10 (second machine, later the same day)
 
 - Dev environment stood up and verified end-to-end with mock data on this machine: Node 24 LTS installed per-user (`%LOCALAPPDATA%\Programs\nodejs`, on user PATH — the MSI needs admin, the zip distribution doesn't), pywin32 installed, `npm install` clean. Verified via API: health, live 10Hz state, quick_check scenario, belt_slip inject → warn → FAIL → clear → recovery events, CSV export (1900+ rows), rig persistence, Vite page serving. Note: both servers bind IPv4/localhost quirks — use `http://localhost:5173` for Vite (it binds ::1) and `http://127.0.0.1:8720` for the API (it binds IPv4 only).

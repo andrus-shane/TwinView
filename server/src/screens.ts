@@ -9,6 +9,24 @@ const run = promisify(execFile);
 
 const REMOTE_JAR = '/data/local/tmp/twinview-scrcpy-server.jar';
 
+/**
+ * Encoder settings per stream use. Fixed server-side profiles rather than
+ * client-supplied numbers, so a page can't ask 20 devices for full-rate video.
+ */
+export const STREAM_PROFILES = {
+  /** Focused unit: readable and fluid (scrcpy's default 8 Mbps bitrate). */
+  unit: { maxSize: 1024, maxFps: 30, bitRate: 0 },
+  /** Lab wall: ~20 concurrent consoles at glance fidelity — H.264 deltas at
+   * this size/fps make an idle screen nearly free. */
+  lab: { maxSize: 480, maxFps: 2, bitRate: 300_000 },
+} as const;
+
+export type StreamProfileId = keyof typeof STREAM_PROFILES;
+
+export function isStreamProfile(v: string): v is StreamProfileId {
+  return v in STREAM_PROFILES;
+}
+
 export interface ScreenDevice {
   serial: string;
   product: string;
@@ -103,7 +121,10 @@ export class ScreenStream {
   private retried = false;
   private cancelAttempt: (() => void) | null = null;
 
-  constructor(private serial: string) {}
+  constructor(
+    private serial: string,
+    private profile: StreamProfileId = 'unit',
+  ) {}
 
   async start(onData: OnData, onEnd: OnEnd): Promise<void> {
     if (!install) throw new Error('scrcpy-server not found on this machine (install scrcpy)');
@@ -127,11 +148,14 @@ export class ScreenStream {
     let cancelled = false;
     this.cancelAttempt = () => (cancelled = true);
     let errTail = '';
+    const { maxSize, maxFps, bitRate } = STREAM_PROFILES[this.profile];
     const proc = spawn(adb, [
       '-s', this.serial, 'shell',
       `CLASSPATH=${REMOTE_JAR} app_process / com.genymobile.scrcpy.Server ${version}`,
       `scid=${this.scid}`, 'tunnel_forward=true', 'video=true', 'audio=false', 'control=false',
-      'cleanup=true', 'raw_stream=true', 'video_codec=h264', 'max_size=1024', 'max_fps=30',
+      'cleanup=true', 'raw_stream=true', 'video_codec=h264',
+      `max_size=${maxSize}`, `max_fps=${maxFps}`,
+      ...(bitRate > 0 ? [`video_bit_rate=${bitRate}`] : []),
     ]);
     this.proc = proc;
     const tail = (d: Buffer) => {

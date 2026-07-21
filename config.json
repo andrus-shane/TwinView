@@ -1,5 +1,6 @@
 {
-  "source": "mock",
+  "source": "serial",
+  "serialConfigPath": "treadmill_sensors.json",
   "port": 8720,
-  "_comment": "source: 'mock' | 'serial'. For serial, set serialConfigPath to a TabletAutoTest-format treadmill_sensors.json"
+  "_comment": "source: 'mock' | 'serial'. serial reads the bench Arduino Mega (rig-monitor sketch, COM11 @ 115200) into bay 1; set source back to 'mock' when the rig is unplugged. belt_speed scale is a placeholder (raw Hz) until the encoder PPR is known."
 }

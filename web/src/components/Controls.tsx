@@ -1,26 +1,49 @@
 import { useState } from 'react';
-import { FAULT_IDS, FAULT_LABELS } from '@twinview/shared';
+import { FAULT_LABELS, FAULTS_BY_KIND, SETPOINT_META } from '@twinview/shared';
 import { useStore } from '../state/store';
 
 export function Controls() {
   const twin = useStore((s) => s.twin);
   const scenarios = useStore((s) => s.scenarios);
-  const { startScenario, stopScenario, setSetpoints, toggleFault } = useStore.getState();
-  const [scenarioId, setScenarioId] = useState('quick_check');
+  const focusedUnitId = useStore((s) => s.focusedUnitId);
+  const units = useStore((s) => s.units);
+  const { startScenario, stopScenario, setSetpoints, toggleFault, setAuto } = useStore.getState();
+  const [scenarioPick, setScenarioPick] = useState<string | null>(null);
   const [dragSpeed, setDragSpeed] = useState<number | null>(null);
   const [dragIncline, setDragIncline] = useState<number | null>(null);
 
+  const unit = units.find((u) => u.id === focusedUnitId);
+  const kind = unit?.kind ?? 'treadmill';
+  const meta = SETPOINT_META[kind];
+  // scenarios and faults are machine-kind specific — a rower can't run an incline sweep
+  const kindScenarios = scenarios.filter((s) => s.kind === kind);
+  const scenarioId = kindScenarios.some((s) => s.id === scenarioPick)
+    ? scenarioPick!
+    : kindScenarios[0]?.id ?? '';
   const running = twin?.running ?? false;
   const speed = dragSpeed ?? twin?.setpoints.speed ?? 0;
   const incline = dragIncline ?? twin?.setpoints.incline ?? 0;
 
   return (
     <div className="card">
-      <div className="card-title">Test Control</div>
+      <div className="card-title row-between">
+        <span>Test Control</span>
+        {unit?.source !== 'serial' && (
+          <label className="check auto-toggle" title="Unit cycles scenarios on its own; any manual action takes over">
+            <input
+              type="checkbox"
+              checked={unit?.auto ?? false}
+              onChange={(e) => void setAuto(e.target.checked)}
+            />
+            auto
+          </label>
+        )}
+      </div>
+      {unit?.auto && <div className="auto-note">Cycling scenarios automatically — manual actions take over.</div>}
 
       <div className="row">
-        <select value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} disabled={running}>
-          {scenarios.map((s) => (
+        <select value={scenarioId} onChange={(e) => setScenarioPick(e.target.value)} disabled={running}>
+          {kindScenarios.map((s) => (
             <option key={s.id} value={s.id} title={s.description}>
               {s.label}
             </option>
@@ -31,7 +54,7 @@ export function Controls() {
             Stop
           </button>
         ) : (
-          <button className="btn primary" onClick={() => startScenario(scenarioId)}>
+          <button className="btn primary" onClick={() => startScenario(scenarioId)} disabled={!scenarioId}>
             Run
           </button>
         )}
@@ -49,13 +72,13 @@ export function Controls() {
 
       <label className="slider-label">
         <span>
-          Speed setpoint <b>{speed.toFixed(1)} mph</b>
+          {meta.speed.label} setpoint <b>{speed.toFixed(meta.speed.step < 1 ? 1 : 0)} {meta.speed.unit}</b>
         </span>
         <input
           type="range"
-          min={0}
-          max={12}
-          step={0.5}
+          min={meta.speed.min}
+          max={meta.speed.max}
+          step={meta.speed.step}
           value={speed}
           disabled={running}
           onChange={(e) => setDragSpeed(parseFloat(e.target.value))}
@@ -67,13 +90,13 @@ export function Controls() {
       </label>
       <label className="slider-label">
         <span>
-          Incline setpoint <b>{incline.toFixed(1)} %</b>
+          {meta.incline.label} setpoint <b>{incline.toFixed(meta.incline.step < 1 ? 1 : 0)} {meta.incline.unit}</b>
         </span>
         <input
           type="range"
-          min={-3}
-          max={15}
-          step={0.5}
+          min={meta.incline.min}
+          max={meta.incline.max}
+          step={meta.incline.step}
           value={incline}
           disabled={running}
           onChange={(e) => setDragIncline(parseFloat(e.target.value))}
@@ -86,7 +109,7 @@ export function Controls() {
 
       <div className="card-title sub">Fault Injection (mock)</div>
       <div className="fault-grid">
-        {FAULT_IDS.map((f) => {
+        {FAULTS_BY_KIND[kind].map((f) => {
           const active = twin?.faults[f] ?? false;
           return (
             <button

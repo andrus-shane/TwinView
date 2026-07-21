@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  CHANNEL_IDS,
+  CHANNELS_BY_KIND,
   RIG_ROLES,
   ROLE_LABELS,
   type ChannelId,
@@ -13,13 +13,25 @@ const CHANNEL_LABELS: Record<ChannelId, string> = {
   incline: 'Incline (inclinometer)',
   motor_current: 'Motor current (clamp)',
   vibration: 'Vibration (IMU)',
+  stroke_rate: 'Stroke rate (position encoder)',
+  flywheel_speed: 'Flywheel speed (optical tach)',
+  drive_power: 'Drive power (load cell)',
+  resistance: 'Resistance (servo encoder)',
+  stride_rate: 'Stride rate (crank cadence)',
+  rep_rate: 'Rep cadence (carriage encoder)',
+  carriage_travel: 'Carriage travel (rail strip)',
 };
 
 /** Shown when a part is selected: attach a sensor channel and/or rig role. */
 export function BindDialog() {
   const selected = useStore((s) => s.selectedNode);
+  const open = useStore((s) => s.bindDialogOpen);
   const rig = useStore((s) => s.rig);
-  const { saveBinding, removeBinding, select, setPartGroup } = useStore.getState();
+  const focusedUnitId = useStore((s) => s.focusedUnitId);
+  const units = useStore((s) => s.units);
+  const { saveBinding, removeBinding, setBindDialogOpen, setPartGroup } = useStore.getState();
+  // only offer the focused machine kind's sensor channels
+  const kind = units.find((u) => u.id === focusedUnitId)?.kind ?? 'treadmill';
   const partGroup = selected ? rig.groups?.find((g) => g.parts.includes(selected))?.name ?? '' : '';
 
   const existing = rig.bindings.find((b) => b.nodeName === selected);
@@ -33,7 +45,7 @@ export function BindDialog() {
     setNote(existing?.sensor?.note ?? '');
   }, [selected]);
 
-  if (!selected) return null;
+  if (!selected || !open) return null;
 
   const toggleChannel = (c: ChannelId) =>
     setChannels((cur) => (cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]));
@@ -42,7 +54,7 @@ export function BindDialog() {
     <div className="bind-dialog card">
       <div className="card-title row-between">
         <span title={selected}>{selected.length > 30 ? `${selected.slice(0, 30)}…` : selected}</span>
-        <button className="btn small" onClick={() => select(null)}>
+        <button className="btn small" onClick={() => setBindDialogOpen(false)}>
           ✕
         </button>
       </div>
@@ -64,7 +76,7 @@ export function BindDialog() {
 
       <div className="field">
         <span>Sensor channels (mock — swap to USB serial later)</span>
-        {CHANNEL_IDS.map((c) => (
+        {CHANNELS_BY_KIND[kind].map((c) => (
           <label key={c} className="check">
             <input type="checkbox" checked={channels.includes(c)} onChange={() => toggleChannel(c)} />
             {CHANNEL_LABELS[c]}
@@ -94,19 +106,28 @@ export function BindDialog() {
       <div className="row">
         <button
           className="btn primary"
-          onClick={() =>
+          onClick={() => {
             void saveBinding({
               nodeName: selected,
               role: role || undefined,
               channels,
               sensor: { kind: 'mock', note: note || undefined },
-            })
-          }
+              // attach lists are authored in the rig JSON — carry them through UI edits
+              attach: existing?.attach,
+            });
+            setBindDialogOpen(false);
+          }}
         >
           Save binding
         </button>
         {existing && (
-          <button className="btn danger" onClick={() => void removeBinding(selected)}>
+          <button
+            className="btn danger"
+            onClick={() => {
+              void removeBinding(selected);
+              setBindDialogOpen(false);
+            }}
+          >
             Remove
           </button>
         )}

@@ -1,3 +1,13 @@
+import { markCanvasFrame } from './canvasFrames';
+
+export interface AdbScreenOptions {
+  /** Server-side encoder preset: 'unit' = focused full quality, 'lab' = thumbnail rate */
+  profile?: 'unit' | 'lab';
+  /** Reconnect with backoff when the stream drops (lab wall self-heals; unit view
+   * stays manual so a bad device pick doesn't retry forever behind the dropdown) */
+  reconnect?: boolean;
+}
+
 /**
  * Live tablet console: raw H.264 (Annex-B) from scrcpy-server arrives over
  * /ws/screen/:serial, WebCodecs decodes it, and frames paint into a canvas
@@ -14,8 +24,12 @@ export class AdbScreen {
   private haveKey = false;
   private frames = 0;
   private disposed = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private serial: string) {
+  constructor(
+    readonly serial: string,
+    private opts: AdbScreenOptions = {},
+  ) {
     this.canvas = document.createElement('canvas');
     this.canvas.width = 640;
     this.canvas.height = 384;
@@ -24,10 +38,17 @@ export class AdbScreen {
   }
 
   connect(): void {
+    if (this.disposed) return;
     if (typeof VideoDecoder === 'undefined') {
       this.banner('WebCodecs not supported in this browser');
       return;
     }
+    // fresh session = fresh Annex-B state: new SPS/PPS and keyframe lead it
+    this.buf = new Uint8Array(0);
+    this.params = [];
+    this.configured = false;
+    this.haveKey = false;
+    if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = new VideoDecoder({
       output: (frame) => this.paint(frame),
       error: (e) => {
@@ -36,11 +57,20 @@ export class AdbScreen {
       },
     });
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.ws = new WebSocket(`${proto}://${location.host}/ws/screen/${encodeURIComponent(this.serial)}`);
+    const profile = this.opts.profile ?? 'unit';
+    this.ws = new WebSocket(
+      `${proto}://${location.host}/ws/screen/${encodeURIComponent(this.serial)}?profile=${profile}`,
+    );
     this.ws.binaryType = 'arraybuffer';
     this.ws.onmessage = (ev) => this.ingest(new Uint8Array(ev.data as ArrayBuffer));
     this.ws.onclose = (ev) => {
-      if (!this.disposed) this.banner(ev.reason || 'stream closed');
+      if (this.disposed) return;
+      this.banner(ev.reason || 'stream closed');
+      if (this.opts.reconnect) {
+        // jittered so 20 lab streams dropped by one adb hiccup don't storm back
+        const delay = 8000 + Math.random() * 4000;
+        this.retryTimer = setTimeout(() => this.connect(), delay);
+      }
     };
   }
 
@@ -128,6 +158,7 @@ export class AdbScreen {
     }
     this.g.drawImage(frame, 0, 0, w, h);
     frame.close();
+    markCanvasFrame(this.canvas);
   }
 
   private banner(text: string): void {
@@ -141,10 +172,12 @@ export class AdbScreen {
     g.font = '13px system-ui';
     g.fillStyle = '#5b6b85';
     g.fillText(this.serial, canvas.width / 2, canvas.height / 2 + 28);
+    markCanvasFrame(this.canvas);
   }
 
   dispose(): void {
     this.disposed = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
     this.ws?.close();
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
   }

@@ -1,5 +1,5 @@
 import type { GroupDisplay } from '@twinview/shared';
-import { useStore } from '../state/store';
+import { effectiveRig, useStore } from '../state/store';
 
 const NEXT: Record<GroupDisplay, GroupDisplay> = { solid: 'xray', xray: 'hidden', hidden: 'solid' };
 const ICON: Record<GroupDisplay, string> = { solid: '●', xray: '◐', hidden: '○' };
@@ -11,7 +11,7 @@ const TITLE: Record<GroupDisplay, string> = {
 
 /** Visibility layers: each group cycles solid → x-ray → hidden. */
 export function LayersPanel() {
-  const groups = useStore((s) => s.rig.groups);
+  const groups = useStore((s) => effectiveRig(s).groups);
   const { setGroupDisplay, setAllGroups } = useStore.getState();
 
   if (!groups?.length) return null;

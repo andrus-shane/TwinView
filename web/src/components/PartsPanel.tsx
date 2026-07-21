@@ -1,23 +1,24 @@
 import { useMemo, useState } from 'react';
 import type { ChannelStatus } from '@twinview/shared';
-import { useStore } from '../state/store';
+import { effectiveRig, useStore } from '../state/store';
 
 function bindingStatus(nodeName: string): ChannelStatus | null {
-  const { rig, twin } = useStore.getState();
-  const b = rig.bindings.find((x) => x.nodeName === nodeName);
+  const s = useStore.getState();
+  const { twin } = s;
+  const b = effectiveRig(s).bindings.find((x) => x.nodeName === nodeName);
   if (!b || !twin || b.channels.length === 0) return null;
   const rank = { ok: 0, stale: 1, warn: 2, fail: 3 };
   let worst: ChannelStatus = 'ok';
   for (const ch of b.channels) {
-    const s = twin.channels[ch]?.status ?? 'ok';
-    if (rank[s] > rank[worst]) worst = s;
+    const st = twin.channels[ch]?.status ?? 'ok';
+    if (rank[st] > rank[worst]) worst = st;
   }
   return worst;
 }
 
 export function PartsPanel({ onFocus }: { onFocus: (name: string) => void }) {
   const partNames = useStore((s) => s.partNames);
-  const rig = useStore((s) => s.rig);
+  const rig = useStore(effectiveRig);
   const selected = useStore((s) => s.selectedNode);
   const select = useStore((s) => s.select);
   useStore((s) => s.twin?.t); // re-render for status dots

@@ -14,7 +14,8 @@
     "react-dom": "^19.0.0",
     "three": "^0.180.0",
     "uplot": "^1.6.31",
-    "zustand": "^5.0.0"
+    "zustand": "^5.0.0",
+    "meshoptimizer": "^1.2.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

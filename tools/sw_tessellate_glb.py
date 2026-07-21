@@ -79,7 +79,7 @@ def transform_points(flat_xyz: list[float], m: list[float]) -> list[float]:
     return out
 
 
-def write_glb(out_path: Path, parts: list[dict]) -> None:
+def write_glb(out_path: Path, parts: list[dict], model_name: str) -> None:
     bin_chunks, accessors, buffer_views, meshes, nodes = [], [], [], [], []
     offset = 0
     for p in parts:
@@ -99,7 +99,7 @@ def write_glb(out_path: Path, parts: list[dict]) -> None:
                        "primitives": [{"attributes": {"POSITION": len(accessors) - 1}, "material": 0, "mode": 4}]})
         nodes.append({"name": p["name"], "mesh": len(meshes) - 1})
 
-    nodes.append({"name": "NTL99925", "children": list(range(len(nodes)))})
+    nodes.append({"name": model_name, "children": list(range(len(nodes)))})
     import json
     gltf = {
         "asset": {"version": "2.0", "generator": "sw_tessellate_glb"},
@@ -145,7 +145,10 @@ def main() -> int:
     SAVE_EVERY = 3     # flips between Save3 checkpoints (crashes every ~2-5 flips)
     MIN_EXTENT = 0.25  # m — skip suppressed components smaller than this; crashes
                        # are the scarce resource, don't spend them on screws
-    STATE_FILE = ROOT / "models" / "_unsuppress_state.json"
+    # Per-assembly sidecar: blacklists are poison-part lists for ONE assembly and
+    # must not leak between models (part numbers repeat across product lines).
+    model_name = src.stem.lstrip("~")
+    STATE_FILE = ROOT / "models" / f"_unsuppress_state_{model_name}.json"
 
     def load_state() -> dict:
         if STATE_FILE.exists():
@@ -485,7 +488,7 @@ def main() -> int:
         f"y[{min(ally):.2f},{max(ally):.2f}] z[{min(allz):.2f},{max(allz):.2f}]  "
         f"extent {max(allx)-min(allx):.2f} x {max(ally)-min(ally):.2f} x {max(allz)-min(allz):.2f}")
 
-    write_glb(out, parts)
+    write_glb(out, parts, model_name)
     log(f"SUCCESS: {out} ({out.stat().st_size/1e6:.1f} MB)")
     return 0
 
