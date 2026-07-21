@@ -159,6 +159,18 @@ All three machines fixed and visually verified mid-scenario:
   carriage so the hooks stay with the hand-loop grips; the parked full-length rope
   meshes (RX1574-*) are hidden via a "Ropes (parked, unanimated)" group.
 
+Same-day follow-ups (user-reported):
+- Lab floor went wild for ellipticals: the LOD keeps only BOUND nodes (viewer.ts
+  builds keepNames from bindings), so on lab-floor instances the pin path saw the
+  pedal platform as its own "pin" a meter off the axle and orbited it hugely.
+  setupPedals now sanity-checks every pin radius (≤0.45 m) and falls back to the
+  stride ellipse when the pin clusters aren't present.
+- The connecting bar (1002348-*, swing arm ↔ pedal arm) read as static: welded into
+  the arm group its foot swept an arc while the pedal arm heaved beneath it. The bar
+  (+ its foot-wheel cluster, split from the arm group at hinge.y − 0.15) is now its
+  own body pivoting at the arm hinge, angled per frame so the foot points at the
+  pedal-arm knuckle (y+iz phasor: rotation.x = arg(u0 + Δknuckle) − arg(u0)).
+
 ## Update 2026-07-17 — animation defect diagnosis (recorded evidence)
 
 Recorded each machine mid-scenario (16 timestamped frames + webm each, Playwright) and

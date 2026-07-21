@@ -135,8 +135,21 @@ export class RigAnimator {
   private crankCenter: THREE.Vector3 | null = null;
   /** Per-side pedal phases so fallback arms can swing exactly opposite their pedal */
   private pedalPhaseBySide: { pos?: number; neg?: number } = {};
-  /** Per-side crank-pin rest vectors for the link-driven arms */
-  private pedalPinBySide: { pos?: { v0y: number; v0z: number }; neg?: { v0y: number; v0z: number } } = {};
+  /** Per-side crank-pin data for the link-driven arms and connecting bars */
+  private pedalPinBySide: {
+    pos?: { v0y: number; v0z: number; zPin: number; leverF: number };
+    neg?: { v0y: number; v0z: number; zPin: number; leverF: number };
+  } = {};
+  /** Connecting bars (swing arm ↔ pedal arm): their own bodies about the arm
+   * hinge, angled each frame to keep the foot on the pedal-arm knuckle */
+  private armLinks: {
+    pivot: THREE.Object3D;
+    u0y: number;
+    u0z: number;
+    v0y: number;
+    v0z: number;
+    kB: number;
+  }[] = [];
   private stridePhase = 0;
   // Pilates rep rig: carriage slides out-and-back, spring pack stretches to it
   private carriages: { object: THREE.Object3D; base: THREE.Vector3; dir: THREE.Vector3 }[] = [];
@@ -570,6 +583,13 @@ export class RigAnimator {
     const isCad = !pedalParts.some((p) => p.object.name.startsWith('Pedal_'));
 
     if (C && isCad) {
+      // Resolve every pedal's pin cluster first, and only commit to pin mode
+      // when each pin sits at a plausible crank radius. On the lab-floor LOD
+      // instances only the bound platform survives (attach parts are merged
+      // away), which would make the platform itself the "pin" a meter off the
+      // axle and orbit the pedal wildly — those fall back to the ellipse.
+      const MAX_PIN_RADIUS = 0.45;
+      const resolved: { group: THREE.Object3D[]; pin: THREE.Vector3; lever: number; boundX: number }[] = [];
       for (const part of pedalParts) {
         const group = [part.object, ...part.attached];
         const centers: THREE.Vector3[] = [];
@@ -586,16 +606,29 @@ export class RigAnimator {
         // pin lift into the pitch keeping the roller end at ramp height
         let lever = 0;
         for (const c of centers) if (Math.abs(c.z - pin.z) > Math.abs(lever)) lever = c.z - pin.z;
-        const pivot = this.wrapGroupInPivot(group, pin, '__pedal_pivot__');
-        const v0y = pin.y - C.y;
-        const v0z = pin.z - C.z;
-        this.pedals.push({ mode: 'pin', pivot, home: pin.clone(), v0y, v0z, lever });
         const bc = this.modelRoot.worldToLocal(
           new THREE.Box3().setFromObject(part.object).getCenter(new THREE.Vector3()),
         );
-        this.pedalPinBySide[bc.x >= 0 ? 'pos' : 'neg'] = { v0y, v0z };
+        resolved.push({ group, pin, lever, boundX: bc.x });
       }
-      return;
+      const pinsPlausible =
+        resolved.length === pedalParts.length &&
+        resolved.every((r) => Math.hypot(r.pin.y - C.y, r.pin.z - C.z) <= MAX_PIN_RADIUS);
+      if (pinsPlausible) {
+        for (const r of resolved) {
+          const pivot = this.wrapGroupInPivot(r.group, r.pin, '__pedal_pivot__');
+          const v0y = r.pin.y - C.y;
+          const v0z = r.pin.z - C.z;
+          this.pedals.push({ mode: 'pin', pivot, home: r.pin.clone(), v0y, v0z, lever: r.lever });
+          this.pedalPinBySide[r.boundX >= 0 ? 'pos' : 'neg'] = {
+            v0y,
+            v0z,
+            zPin: r.pin.z,
+            leverF: r.lever,
+          };
+        }
+        return;
+      }
     }
 
     const centers = pedalParts.map((p) =>
@@ -643,22 +676,55 @@ export class RigAnimator {
         continue;
       }
       const at = this.armHinge(bbox, centerWorld, part.attached);
-      const pivot = this.wrapGroupInPivot([part.object, ...part.attached], at, '__arm_pivot__');
       const pin = this.pedalPinBySide[side];
-      if (pin) {
-        // lever = hinge to the lowest cluster in the group (the link bottom
-        // that rides the pedal arm)
-        let bottomY = at.y;
-        for (const o of [part.object, ...part.attached]) {
-          const b = new THREE.Box3().setFromObject(o);
-          if (b.isEmpty()) continue;
-          const c = this.modelRoot.worldToLocal(b.getCenter(new THREE.Vector3()));
-          if (c.y < bottomY) bottomY = c.y;
-        }
-        this.arms.push({ mode: 'link', object: pivot, v0y: pin.v0y, v0z: pin.v0z, lever: Math.max(0.2, at.y - bottomY) });
-      } else {
+      if (!pin) {
+        const pivot = this.wrapGroupInPivot([part.object, ...part.attached], at, '__arm_pivot__');
         const pedalPhase = this.pedalPhaseBySide[side] ?? (center.x >= 0 ? Math.PI / 2 : Math.PI * 1.5);
         this.arms.push({ mode: 'swing', object: pivot, phase: pedalPhase + Math.PI });
+        continue;
+      }
+      // The connecting bar (lower link + its foot wheel) is a body of its own:
+      // welded to the pole it would sweep an arc while the pedal arm under its
+      // foot heaves, leaving the foot in mid-air. Split the group at the hinge:
+      // everything hanging well below it is the bar.
+      const poleBody: THREE.Object3D[] = [];
+      const barBody: THREE.Object3D[] = [];
+      const partCenters = new Map<THREE.Object3D, THREE.Vector3>();
+      for (const o of [part.object, ...part.attached]) {
+        const b = new THREE.Box3().setFromObject(o);
+        if (b.isEmpty()) {
+          poleBody.push(o);
+          continue;
+        }
+        const c = this.modelRoot.worldToLocal(b.getCenter(new THREE.Vector3()));
+        partCenters.set(o, c);
+        (c.y < at.y - 0.15 ? barBody : poleBody).push(o);
+      }
+      let lever = 0.2;
+      let footB: THREE.Vector3 | null = null;
+      for (const o of barBody) {
+        const c = partCenters.get(o)!;
+        lever = Math.max(lever, at.y - c.y);
+        if (!footB || c.y < footB.y) footB = c;
+      }
+      const polePivot = this.wrapGroupInPivot(
+        poleBody.length > 0 ? poleBody : [part.object],
+        at,
+        '__arm_pivot__',
+      );
+      this.arms.push({ mode: 'link', object: polePivot, v0y: pin.v0y, v0z: pin.v0z, lever });
+      if (barBody.length > 0 && footB) {
+        const barPivot = this.wrapGroupInPivot(barBody, at, '__arm_link_pivot__');
+        this.armLinks.push({
+          pivot: barPivot,
+          u0y: footB.y - at.y,
+          u0z: footB.z - at.z,
+          v0y: pin.v0y,
+          v0z: pin.v0z,
+          // foot target rides the pedal arm: full pin heave at the pin, fading
+          // to zero at the ramp-roller end
+          kB: 1 - (footB.z - pin.zPin) / (pin.leverF || 1),
+        });
       }
     }
   }
@@ -1015,6 +1081,15 @@ export class RigAnimator {
           a.object.rotation.x = 0.22 * Math.cos(theta + a.phase);
         }
       }
+      // Connecting bars: rotate about the hinge so the foot points at the
+      // pedal-arm knuckle wherever the arm carried it (y + iz phasor angle)
+      for (const l of this.armLinks) {
+        const dyPin = l.v0y * cosT + l.v0z * sinT - l.v0y;
+        const dzPin = -l.v0y * sinT + l.v0z * cosT - l.v0z;
+        const uy = l.u0y + dyPin * l.kB;
+        const uz = l.u0z + dzPin;
+        l.pivot.rotation.x = Math.atan2(uz, uy) - Math.atan2(l.u0z, l.u0y);
+      }
       // Absolute angle (not incremental) keeps the crank pins in step with the
       // pedal groups riding them.
       for (const c of this.cranks) c.pivot.quaternion.setFromAxisAngle(c.axis, -theta);
@@ -1128,6 +1203,7 @@ export class RigAnimator {
     this.strokeSlides = [];
     this.pedals = [];
     this.arms = [];
+    this.armLinks = [];
     this.directArms = [];
     this.pedalPhaseBySide = {};
     this.pedalPinBySide = {};
