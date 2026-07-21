@@ -140,6 +140,25 @@ reformer ropes `RX1574-*` (full-rail meshes; the hand-loops ride the carriage as
 approximation); elliptical left ramp rail `1002284-1` isn't in the incline binding.
 All would need path/stretch animations, not rigid groups.
 
+## Update 2026-07-21 — diagnosis fixes applied (see 2026-07-17 below for evidence)
+
+All three machines fixed and visually verified mid-scenario:
+- Rower: seat rebound to the front carriage (`434166-1` + cushion `361660-1` + 55-part
+  attach); the mis-bound "handle" binding (it was the cushion) removed; the rear
+  duplicate carriage hidden via a `hidden` display group ("Duplicate seat carriage
+  (CAD artifact)"). `setupCadStroke` now derives the stroke anchor from the CAD pose
+  (front half of the machine = catch), so rest = exact CAD pose.
+- Elliptical: CAD pedal groups are now PIN-DRIVEN two-body movers (rig.ts): the pin
+  joint is the group cluster nearest the crank axle; each frame the group translates by
+  the pin's exact orbit (R_x(−θ)·v0 − v0, matching the crank quaternion) and pitches
+  about the pin (rotation.x = dy/lever) so the roller end stays on the ramp. Arm swing
+  is solved from the same-side pin's fore-aft travel through the lower-link lever
+  (rotation.x = −dz/lever) instead of a fixed ±0.22 arc. The stride-ellipse path
+  remains as the proxy fallback. Crank junctions can no longer shear by construction.
+- Pilates: rope end stops (RX1566/RX1567 + RX990033 screws, 12 nodes) now ride the
+  carriage so the hooks stay with the hand-loop grips; the parked full-length rope
+  meshes (RX1574-*) are hidden via a "Ropes (parked, unanimated)" group.
+
 ## Update 2026-07-17 — animation defect diagnosis (recorded evidence)
 
 Recorded each machine mid-scenario (16 timestamped frames + webm each, Playwright) and

@@ -114,14 +114,29 @@ export class RigAnimator {
   private strapAnchorZ = 0;
   private strapBase: { scaleZ: number; posZ: number } | null = null;
   private strokePhase = 0;
-  // Elliptical stride rig: pedals orbit a shared ellipse, arm poles swing opposite
-  private pedals: { pivot: THREE.Object3D; corr: THREE.Vector3; phase: number }[] = [];
-  private arms: { object: THREE.Object3D; phase: number }[] = [];
+  // Elliptical stride rig. CAD pedal-arm groups with a crank present are
+  // pin-driven two-body movers: the group translates on the crank pin's exact
+  // orbit and pitches about the pin so the roller end stays on its ramp.
+  // Proxy pedals (no crank) fall back to the shared stride ellipse.
+  private pedals: (
+    | { mode: 'ellipse'; pivot: THREE.Object3D; corr: THREE.Vector3; phase: number }
+    | { mode: 'pin'; pivot: THREE.Object3D; home: THREE.Vector3; v0y: number; v0z: number; lever: number }
+  )[] = [];
+  /** Arms either swing a fixed arc (proxy) or track the same-side crank pin's
+   * fore-aft motion through their lower link (CAD). */
+  private arms: (
+    | { mode: 'swing'; object: THREE.Object3D; phase: number }
+    | { mode: 'link'; object: THREE.Object3D; v0y: number; v0z: number; lever: number }
+  )[] = [];
   private directArms: THREE.Object3D[] = []; // proxy arm groups whose rotation we reset on teardown
-  /** Crank spider/arms: absolute angle is phase-locked to the pedal ellipse */
+  /** Crank spider/arms: absolute angle is phase-locked to the pedal orbit */
   private cranks: { pivot: THREE.Object3D; axis: THREE.Vector3 }[] = [];
-  /** Per-side pedal phases so the arms can swing exactly opposite their pedal */
+  /** Crank axle center (modelRoot-local) — anchors the pin-driven pedal math */
+  private crankCenter: THREE.Vector3 | null = null;
+  /** Per-side pedal phases so fallback arms can swing exactly opposite their pedal */
   private pedalPhaseBySide: { pos?: number; neg?: number } = {};
+  /** Per-side crank-pin rest vectors for the link-driven arms */
+  private pedalPinBySide: { pos?: { v0y: number; v0z: number }; neg?: { v0y: number; v0z: number } } = {};
   private stridePhase = 0;
   // Pilates rep rig: carriage slides out-and-back, spring pack stretches to it
   private carriages: { object: THREE.Object3D; base: THREE.Vector3; dir: THREE.Vector3 }[] = [];
@@ -355,6 +370,7 @@ export class RigAnimator {
     const { center, axis } = this.wheelPivotFrame(object);
     const pivot = this.wrapGroupInPivot([object, ...attached], center, '__crank_pivot__');
     this.cranks.push({ pivot, axis });
+    this.crankCenter ??= center.clone();
   }
 
   /**
@@ -384,13 +400,19 @@ export class RigAnimator {
         ({ pivot, centerZ } = this.captureSled(seat.object, 0.2, 0.15, 0.15, 0.06, handle?.object ?? null));
       }
       const away = Math.sign(centerZ - flywheelCenter.z) || 1;
-      // CAD pose is the finish (seat aft) — the catch pulls it toward the flywheel
+      // Which end of the stroke is the CAD pose? A seat posed in the front
+      // half of the machine (near the flywheel) is parked at the catch and
+      // slides aft from there; one posed aft is at the finish and the catch
+      // pulls it toward the flywheel.
+      const mb = new THREE.Box3().setFromObject(this.modelRoot);
+      const anchor =
+        Math.abs(centerZ - flywheelCenter.z) < mb.getSize(new THREE.Vector3()).z / 2 ? 0 : 1;
       this.strokeSlides.push({
         object: pivot,
         base: new THREE.Vector3(),
         dir: new THREE.Vector3(0, 0, away),
         travel: 0.5,
-        anchor: 1,
+        anchor,
       });
     }
 
@@ -532,17 +554,50 @@ export class RigAnimator {
     }
   }
 
-  /** Pedals orbit a shared stride ellipse, half a cycle apart. Works for the
-   * proxy and CAD alike: each pedal (plus its attached arm/rollers) rides a
-   * pivot; a correction vector pulls both onto the midpoint path so mid-stride
-   * CAD poses still sync up. Path phase/correction always come from the bound
-   * pedal platform, not the group — the arm skews the group bbox badly.
-   * Each pedal's phase is read off its rest pose: the CAD snapshot freezes the
-   * mechanism mid-stride, and solving phase from the rest offset (a) removes
-   * the visible snap onto the ellipse at focus and (b) makes the crank's
-   * absolute angle land on the same clock as the pedals it is pinned to. */
+  /**
+   * CAD pedals with a crank rig ride the crank pin exactly: the pin joint is
+   * the group cluster nearest the crank axle, the CAD pose is its rest angle,
+   * and each frame the group translates by the pin's orbit offset (so it can
+   * never shear off the crank arm) and pitches about the pin so the far
+   * (roller) end stays on the ramp instead of orbiting through the air.
+   * Without a crank, pedals orbit the legacy shared stride ellipse: a
+   * correction vector pulls both onto the midpoint path and each pedal's
+   * phase is solved from its rest offset so the pose never snaps at focus.
+   */
   private setupPedals(pedalParts: { object: THREE.Object3D; attached: THREE.Object3D[] }[]): void {
     if (pedalParts.length === 0) return;
+    const C = this.crankCenter;
+    const isCad = !pedalParts.some((p) => p.object.name.startsWith('Pedal_'));
+
+    if (C && isCad) {
+      for (const part of pedalParts) {
+        const group = [part.object, ...part.attached];
+        const centers: THREE.Vector3[] = [];
+        for (const o of group) {
+          const b = new THREE.Box3().setFromObject(o);
+          if (!b.isEmpty()) centers.push(this.modelRoot.worldToLocal(b.getCenter(new THREE.Vector3())));
+        }
+        if (centers.length === 0) continue;
+        let pin = centers[0];
+        for (const c of centers) {
+          if (Math.hypot(c.y - C.y, c.z - C.z) < Math.hypot(pin.y - C.y, pin.z - C.z)) pin = c;
+        }
+        // signed z-distance to the group's far end: the lever that converts
+        // pin lift into the pitch keeping the roller end at ramp height
+        let lever = 0;
+        for (const c of centers) if (Math.abs(c.z - pin.z) > Math.abs(lever)) lever = c.z - pin.z;
+        const pivot = this.wrapGroupInPivot(group, pin, '__pedal_pivot__');
+        const v0y = pin.y - C.y;
+        const v0z = pin.z - C.z;
+        this.pedals.push({ mode: 'pin', pivot, home: pin.clone(), v0y, v0z, lever });
+        const bc = this.modelRoot.worldToLocal(
+          new THREE.Box3().setFromObject(part.object).getCenter(new THREE.Vector3()),
+        );
+        this.pedalPinBySide[bc.x >= 0 ? 'pos' : 'neg'] = { v0y, v0z };
+      }
+      return;
+    }
+
     const centers = pedalParts.map((p) =>
       this.modelRoot.worldToLocal(new THREE.Box3().setFromObject(p.object).getCenter(new THREE.Vector3())),
     );
@@ -567,29 +622,43 @@ export class RigAnimator {
             ? Math.PI / 2
             : Math.PI * 1.5;
       this.pedalPhaseBySide[centers[i].x >= 0 ? 'pos' : 'neg'] = phase;
-      this.pedals.push({ pivot, corr, phase });
+      this.pedals.push({ mode: 'ellipse', pivot, corr, phase });
     });
   }
 
-  /** Arm poles swing opposite their side's pedal. Proxy arm groups are their
-   * own pivots; CAD poles get a pivot at the physical hinge, and attached
-   * grips/links swing on the same pivot. */
+  /** Arm poles swing about their physical hinge. When the same side has a
+   * crank pin (CAD elliptical), the swing angle is solved so the lower link's
+   * bottom tracks the pedal arm's fore-aft motion exactly; otherwise the arm
+   * swings a fixed arc opposite its side's pedal (proxy fallback). */
   private setupArms(armParts: { object: THREE.Object3D; attached: THREE.Object3D[] }[]): void {
     for (const part of armParts) {
       const bbox = new THREE.Box3().setFromObject(part.object);
       const centerWorld = bbox.getCenter(new THREE.Vector3());
       const center = this.modelRoot.worldToLocal(centerWorld.clone());
-      const side = center.x >= 0 ? 'pos' : 'neg';
-      const pedalPhase =
-        this.pedalPhaseBySide[side] ?? (center.x >= 0 ? Math.PI / 2 : Math.PI * 1.5);
-      const phase = pedalPhase + Math.PI; // opposite the same-side pedal
+      const side = center.x >= 0 ? ('pos' as const) : ('neg' as const);
       if (part.object.name.startsWith('Arm_')) {
+        const pedalPhase = this.pedalPhaseBySide[side] ?? (center.x >= 0 ? Math.PI / 2 : Math.PI * 1.5);
         this.directArms.push(part.object);
-        this.arms.push({ object: part.object, phase });
+        this.arms.push({ mode: 'swing', object: part.object, phase: pedalPhase + Math.PI });
+        continue;
+      }
+      const at = this.armHinge(bbox, centerWorld, part.attached);
+      const pivot = this.wrapGroupInPivot([part.object, ...part.attached], at, '__arm_pivot__');
+      const pin = this.pedalPinBySide[side];
+      if (pin) {
+        // lever = hinge to the lowest cluster in the group (the link bottom
+        // that rides the pedal arm)
+        let bottomY = at.y;
+        for (const o of [part.object, ...part.attached]) {
+          const b = new THREE.Box3().setFromObject(o);
+          if (b.isEmpty()) continue;
+          const c = this.modelRoot.worldToLocal(b.getCenter(new THREE.Vector3()));
+          if (c.y < bottomY) bottomY = c.y;
+        }
+        this.arms.push({ mode: 'link', object: pivot, v0y: pin.v0y, v0z: pin.v0z, lever: Math.max(0.2, at.y - bottomY) });
       } else {
-        const at = this.armHinge(bbox, centerWorld, part.attached);
-        const pivot = this.wrapGroupInPivot([part.object, ...part.attached], at, '__arm_pivot__');
-        this.arms.push({ object: pivot, phase });
+        const pedalPhase = this.pedalPhaseBySide[side] ?? (center.x >= 0 ? Math.PI / 2 : Math.PI * 1.5);
+        this.arms.push({ mode: 'swing', object: pivot, phase: pedalPhase + Math.PI });
       }
     }
   }
@@ -918,16 +987,36 @@ export class RigAnimator {
         this.stridePhase = next >= 1 ? 0 : next;
       }
       const theta = this.stridePhase * Math.PI * 2;
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
       for (const ped of this.pedals) {
-        ped.pivot.position.set(
-          ped.corr.x,
-          ped.corr.y + STRIDE_Y * Math.sin(theta + ped.phase),
-          ped.corr.z + STRIDE_Z * Math.cos(theta + ped.phase),
-        );
+        if (ped.mode === 'pin') {
+          // pin offset = R_x(−θ)·v0 − v0: the exact orbit of the crank pin the
+          // arm is bolted to, so the joint can never shear open
+          const dy = ped.v0y * cosT + ped.v0z * sinT - ped.v0y;
+          const dz = -ped.v0y * sinT + ped.v0z * cosT - ped.v0z;
+          ped.pivot.position.set(ped.home.x, ped.home.y + dy, ped.home.z + dz);
+          ped.pivot.rotation.x = ped.lever ? dy / ped.lever : 0;
+        } else {
+          ped.pivot.position.set(
+            ped.corr.x,
+            ped.corr.y + STRIDE_Y * Math.sin(theta + ped.phase),
+            ped.corr.z + STRIDE_Z * Math.cos(theta + ped.phase),
+          );
+        }
       }
-      for (const a of this.arms) a.object.rotation.x = 0.22 * Math.cos(theta + a.phase);
+      for (const a of this.arms) {
+        if (a.mode === 'link') {
+          // the link bottom (lever below the hinge) tracks the same-side pin's
+          // fore-aft travel: bottom dz ≈ −lever·angle → angle = −dz/lever
+          const dz = -a.v0y * sinT + a.v0z * cosT - a.v0z;
+          a.object.rotation.x = -dz / a.lever;
+        } else {
+          a.object.rotation.x = 0.22 * Math.cos(theta + a.phase);
+        }
+      }
       // Absolute angle (not incremental) keeps the crank pins in step with the
-      // pedal path: at theta=0 the right pedal sits at +z max, crank pin at +z.
+      // pedal groups riding them.
       for (const c of this.cranks) c.pivot.quaternion.setFromAxisAngle(c.axis, -theta);
     }
 
@@ -1041,6 +1130,8 @@ export class RigAnimator {
     this.arms = [];
     this.directArms = [];
     this.pedalPhaseBySide = {};
+    this.pedalPinBySide = {};
+    this.crankCenter = null;
     this.reparents = [];
     this.strap = null;
     this.strapFollow = null;

@@ -236,7 +236,19 @@
         "RX0644-3_1",
         "RX0644-4_1",
         "RX0709_-_TRIANGLE_LINK-1",
-        "RX0709_-_TRIANGLE_LINK-2"
+        "RX0709_-_TRIANGLE_LINK-2",
+        "RX1566_RX-H_-_Rope_End_Stop_Left-1",
+        "RX1566_RX-H_-_Rope_End_Stop_Left-1_1",
+        "RX1567_RX-H_-_Rope_End_Stop_Right-1",
+        "RX1567_RX-H_-_Rope_End_Stop_Right-1_1",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-1",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-1_1",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-2",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-2_1",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-3",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-3_1",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-4",
+        "RX990033_-_5mm_x_20mm_Pan_Head_Recess_T_Drive_Plas-Tech-4_1"
       ]
     },
     {
@@ -325,8 +337,6 @@
         "RX1376_RX-H_-_Cord_Catchment_Tray_-_LH-1",
         "RX1568-1",
         "RX1568-2",
-        "RX1574-1",
-        "RX1574-1_1",
         "RX1582-1",
         "RX1582-2",
         "RX1595_RX-H_Carriage_Outer_Foam-1",
@@ -1166,6 +1176,14 @@
         "RX990050-38"
       ],
       "display": "solid"
+    },
+    {
+      "name": "Ropes (parked, unanimated)",
+      "parts": [
+        "RX1574-1",
+        "RX1574-1_1"
+      ],
+      "display": "hidden"
     }
   ]
 }
