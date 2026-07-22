@@ -1,7 +1,9 @@
 """Compose an upbeat, running-cadence 'fitness app demo' track as a stereo WAV
-(~117s to match docs/twinview-demo.webm). 130 BPM four-on-the-floor: pumping
+(~261s to match docs/twinview-demo.webm). 130 BPM four-on-the-floor: pumping
 sidechained pads (vi-IV-I-V), off-beat octave bass, 16th-note synth lead,
 kick/clap/hats, with drops timed to the demo's phases and a fade-out ending.
+
+Section times come from the MARK lines record_demo.mjs prints while recording.
 
 Usage: python tools/make_demo_music.py [out.wav]
 Then:  ffmpeg -i <silent-demo>.webm -i out.wav -map 0:v -map 1:a \
@@ -13,7 +15,7 @@ import wave
 import numpy as np
 
 SR = 44100
-DUR = 117.1
+DUR = 261.0
 BPM = 130
 BEAT = 60 / BPM            # 0.4615s
 BAR = 4 * BEAT             # 1.846s
@@ -21,11 +23,11 @@ N = int(SR * DUR)
 t = np.arange(N) / SR
 
 # Song map (bars): energy rises with the demo arc, drums out for the outro.
-BASS_IN = 5 * BAR      # ~9s   machine starts moving
-DRUMS_IN = 9 * BAR     # ~17s  groove starts
-DROP1 = 17 * BAR       # ~31s  side-profile incline: full kit + lead
-DROP2 = 33 * BAR       # ~61s  console close-up / faults: 16th hats, busier lead
-OUTRO = 58 * BAR       # ~107s drums out, pads carry the fade
+BASS_IN = 5 * BAR      # ~9s   lab intro settles, floor starts moving
+DRUMS_IN = 21 * BAR    # ~39s  first bay focus (rower): groove starts
+DROP1 = 60 * BAR       # ~111s REAL hardware in bay 01: full kit + lead
+DROP2 = 103 * BAR      # ~190s treadmill fault cascade: 16th hats, busier lead
+OUTRO = 133 * BAR      # ~246s drums out, pads carry the fade
 
 NOTE = lambda semis: 220.0 * 2 ** (semis / 12)  # from A3
 # vi-IV-I-V in C: Am F C G — the classic "keep running" loop

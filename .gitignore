@@ -12,3 +12,4 @@ __pycache__/
 # local demo/dev artifacts
 models/_devshot.png
 /twinview-demo.webm
+demo-video/
