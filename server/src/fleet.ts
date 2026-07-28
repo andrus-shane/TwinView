@@ -27,8 +27,12 @@ export interface FleetOptions {
   autorun: boolean;
   /** Inject a couple of deterministic faults shortly after boot so the lab view has detections to show */
   seedFaults: boolean;
-  /** Real hardware source — becomes bay 1, exempt from autorun and fault injection */
-  serialSource?: TelemetrySource;
+  /**
+   * Real-hardware units keyed by unit id (e.g. "u01"): the machine kind that
+   * bay runs and its telemetry source (serial or net). These bays are exempt
+   * from autorun and fault injection. Unit ids outside 1..size are ignored.
+   */
+  realSources?: Map<string, { kind: MachineKind; source: TelemetrySource }>;
 }
 
 interface Unit {
@@ -51,8 +55,17 @@ export class Fleet {
   private timers: ReturnType<typeof setInterval | typeof setTimeout>[] = [];
 
   constructor(private opts: FleetOptions) {
-    // Non-treadmill bays spread evenly through the floor ("into the mix"),
-    // never bay 1 — that bay can be real serial hardware.
+    const real = opts.realSources ?? new Map<string, { kind: MachineKind; source: TelemetrySource }>();
+    // 0-based bay indices backed by real hardware — they keep their declared
+    // kind and never get a mock plant, autorun, or seeded faults.
+    const realIdx = new Set<number>();
+    for (const id of real.keys()) {
+      const bay = Number.parseInt(id.replace(/^u/, ''), 10);
+      if (Number.isInteger(bay) && bay >= 1 && bay <= opts.size) realIdx.add(bay - 1);
+    }
+
+    // Non-treadmill mock bays spread evenly through the floor ("into the mix"),
+    // never bay 1 and never a real-hardware bay.
     const kindAt = new Map<number, MachineKind>();
     const specials: MachineKind[] = [
       ...Array<MachineKind>(Math.max(0, opts.rowers)).fill('rower'),
@@ -61,8 +74,10 @@ export class Fleet {
     ].slice(0, opts.size - 1);
     specials.forEach((kind, k) => {
       let idx = Math.floor(((k + 1) * opts.size) / (specials.length + 1));
-      while (kindAt.has(idx) || idx === 0) idx = (idx + 1) % opts.size || 1;
-      kindAt.set(idx, kind);
+      for (let guard = 0; (kindAt.has(idx) || idx === 0 || realIdx.has(idx)) && guard < opts.size; guard++) {
+        idx = (idx + 1) % opts.size || 1;
+      }
+      if (!kindAt.has(idx) && idx !== 0 && !realIdx.has(idx)) kindAt.set(idx, kind);
     });
 
     const MODEL: Record<MachineKind, string> = {
@@ -81,8 +96,8 @@ export class Fleet {
     for (let i = 0; i < opts.size; i++) {
       const bay = i + 1;
       const id = `u${String(bay).padStart(2, '0')}`;
-      const isSerial = i === 0 && !!opts.serialSource;
-      const kind: MachineKind = kindAt.get(i) ?? 'treadmill';
+      const realEntry = real.get(id);
+      const kind: MachineKind = realEntry ? realEntry.kind : kindAt.get(i) ?? 'treadmill';
       const unit: Partial<Unit> = {
         info: {
           id,
@@ -91,15 +106,15 @@ export class Fleet {
           serial: `SN-${SERIAL_PREFIX[kind]}${String(bay).padStart(3, '0')}`,
           model: MODEL[kind],
           kind,
-          source: isSerial ? 'serial' : 'mock',
-          auto: opts.autorun && !isSerial,
+          source: realEntry ? realEntry.source.kind : 'mock',
+          auto: opts.autorun && !realEntry,
         },
         nextRunAt: 0,
       };
       // The mock plant reads its own engine's setpoints — forward ref via closure
-      const mock = isSerial ? null : new MockSource(() => unit.engine!.setpoints, kind);
+      const mock = realEntry ? null : new MockSource(() => unit.engine!.setpoints, kind);
       unit.mock = mock;
-      unit.source = isSerial ? opts.serialSource! : mock!;
+      unit.source = realEntry ? realEntry.source : mock!;
       unit.engine = new TwinEngine(unit.source, () => (mock ? mock.faults : NO_FAULTS), kind);
       unit.engine.onEvent((e) => {
         for (const fn of this.eventListeners) fn({ ...e, unitId: id });

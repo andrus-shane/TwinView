@@ -28,7 +28,7 @@ export function Controls() {
     <div className="card">
       <div className="card-title row-between">
         <span>Test Control</span>
-        {unit?.source !== 'serial' && (
+        {unit?.source === 'mock' && (
           <label className="check auto-toggle" title="Unit cycles scenarios on its own; any manual action takes over">
             <input
               type="checkbox"

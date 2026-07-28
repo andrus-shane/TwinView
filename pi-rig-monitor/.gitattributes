@@ -1,0 +1,4 @@
+# These are copied onto the Pi and run under Linux — keep LF regardless of the
+# checkout platform's autocrlf setting.
+rig_monitor.py      text eol=lf
+rig-monitor.service text eol=lf

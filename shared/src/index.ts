@@ -231,7 +231,7 @@ export interface RigBinding {
   role?: RigRole;
   /** Sensor channels attached to this part */
   channels: ChannelId[];
-  sensor?: { kind: 'mock' | 'serial'; port?: string; note?: string };
+  sensor?: { kind: 'mock' | 'serial' | 'net'; port?: string; host?: string; note?: string };
   /**
    * Scene nodes that ride this binding's animation as one rigid group (a seat's
    * sled wheels, a pedal's arm link, the carriage's shoulder blocks). Explicit
@@ -267,7 +267,7 @@ export interface UnitInfo {
   serial: string;
   model: string;
   kind: MachineKind;
-  source: 'mock' | 'serial';
+  source: 'mock' | 'serial' | 'net';
   /** Autorun: unit cycles scenarios on its own until an operator takes over */
   auto: boolean;
   /** adb serial of the tablet console assigned to this bay (streams in lab + unit view) */

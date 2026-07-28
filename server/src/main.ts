@@ -7,10 +7,12 @@ import fastifyWebsocket from '@fastify/websocket';
 import {
   FAULT_IDS,
   type FaultId,
+  type MachineKind,
   type RigConfig,
   type ServerMessage,
 } from '@twinview/shared';
 import { Fleet } from './fleet.js';
+import { NetSource, loadNetConfig } from './sources/net.js';
 import { SerialSource, loadSerialConfig } from './sources/serial.js';
 import type { TelemetrySource } from './sources/types.js';
 import { SCENARIOS } from './scenarios.js';
@@ -28,6 +30,8 @@ const EVENT_BACKLOG = 120; // merged events sent to new WS clients
 interface AppConfig {
   source: 'mock' | 'serial';
   serialConfigPath?: string;
+  /** Path to the network-units config (Raspberry Pi TCP rigs); see network_sensors.json */
+  netConfigPath?: string;
   port: number;
   scrcpyDir?: string;
   fleet?: {
@@ -50,10 +54,24 @@ const config: AppConfig = existsSync(CONFIG_PATH)
 
 mkdirSync(MODELS_DIR, { recursive: true });
 
-// --- The lab fleet: N mock units; a serial config makes bay 1 real hardware ---
-let serialSource: TelemetrySource | undefined;
+// --- The lab fleet: N mock units; serial/net configs make specific bays real.
+// Legacy serial config → bay 1 (u01) treadmill on a COM port; the net config
+// declares real units by id, each aggregating one or more Pi TCP endpoints. ---
+const realSources = new Map<string, { kind: MachineKind; source: TelemetrySource }>();
 if (config.source === 'serial' && config.serialConfigPath) {
-  serialSource = new SerialSource(loadSerialConfig(resolve(ROOT, config.serialConfigPath)));
+  realSources.set('u01', {
+    kind: 'treadmill',
+    source: new SerialSource(loadSerialConfig(resolve(ROOT, config.serialConfigPath))),
+  });
+}
+if (config.netConfigPath) {
+  const netCfg = loadNetConfig(resolve(ROOT, config.netConfigPath));
+  for (const [unitId, spec] of Object.entries(netCfg)) {
+    if (realSources.has(unitId)) {
+      console.warn(`[config] unit ${unitId} is defined by both serial and net config — using net`);
+    }
+    realSources.set(unitId, { kind: spec.kind, source: new NetSource(spec.endpoints) });
+  }
 }
 
 const fleet = new Fleet({
@@ -68,7 +86,7 @@ const fleet = new Fleet({
   pilatesModel: 'NTPL99926-6FW0',
   autorun: config.fleet?.autorun ?? true,
   seedFaults: config.fleet?.seedFaults ?? true,
-  serialSource,
+  realSources,
 });
 
 // --- Model catalog: legacy current.glb (treadmill) + any <MODEL>.glb dropped

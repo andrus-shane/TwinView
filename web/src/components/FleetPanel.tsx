@@ -37,7 +37,7 @@ export function FleetPanel() {
                     </span>
                   )}
                   {u.auto && <span className="auto-chip">auto</span>}
-                  {u.source === 'serial' && <span className="auto-chip live">HW</span>}
+                  {u.source !== 'mock' && <span className="auto-chip live">HW</span>}
                 </div>
                 {running && (
                   <div className="scenario-progress mini">

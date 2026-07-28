@@ -1,0 +1,23 @@
+{
+  "u01": {
+    "kind": "treadmill",
+    "endpoints": [
+      {
+        "host": "testingraspberryzero2.local",
+        "port": 5000,
+        "channels": {
+          "incline": {
+            "pattern": "^incline\\.pitch: (-?\\d+(?:\\.\\d+)?)",
+            "scale": 1.0,
+            "unit": "deg"
+          },
+          "belt_speed": {
+            "pattern": "^tach\\.mph: (-?\\d+(?:\\.\\d+)?)",
+            "scale": 1.0,
+            "unit": "mph"
+          }
+        }
+      }
+    ]
+  }
+}
