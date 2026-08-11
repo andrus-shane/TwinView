@@ -4,8 +4,9 @@
 //   node tools/fake-rig.mjs [port]      (default 5000)
 //
 // It's a TCP *server* (Pi-as-server model): TwinView's NetSource dials in and
-// this streams `incline.pitch: <deg>` and `tach.mph: <mph>` at 10 Hz, matching
-// the patterns in network_sensors.json. Point that config's host at 127.0.0.1
+// this streams `incline.pitch: <deg>`, `incline.grade: <%>` (100*tan(pitch),
+// like the Pi firmware) and `tach.mph: <mph>` at 10 Hz, matching the patterns
+// in network_sensors.json. Point that config's host at 127.0.0.1
 // (or "localhost") while testing, then back to the Pi's .local name for real.
 
 import { createServer } from 'node:net';
@@ -18,10 +19,12 @@ const server = createServer((sock) => {
   let t = 0;
   const timer = setInterval(() => {
     t += 0.1;
-    const pitch = (2 + 1.5 * Math.sin(t / 3)).toFixed(2); // slow incline sweep, deg
+    const pitchDeg = 2 + 1.5 * Math.sin(t / 3); // slow incline sweep, deg
+    const grade = 100 * Math.tan((pitchDeg * Math.PI) / 180); // percent, like the Pi
     const mph = (3 + 2 * Math.sin(t / 5 + 1)).toFixed(2); // belt speed, mph
     // one channel per line, exactly like the rig-monitor sketch / Pi program
-    sock.write(`incline.pitch: ${pitch}\n`);
+    sock.write(`incline.pitch: ${pitchDeg.toFixed(2)}\n`);
+    sock.write(`incline.grade: ${grade.toFixed(2)}\n`);
     sock.write(`tach.mph: ${mph}\n`);
   }, 100);
   const done = () => clearInterval(timer);

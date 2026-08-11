@@ -3,8 +3,8 @@
     "port": "COM11",
     "baud": 115200,
     "pattern": "^incline\\.pitch: (-?\\d+(?:\\.\\d+)?)",
-    "scale": 1.0,
-    "unit": "deg"
+    "scale": 1.7453293,
+    "unit": "%"
   },
   "belt_speed": {
     "port": "COM11",

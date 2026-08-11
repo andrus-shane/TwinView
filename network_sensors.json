@@ -7,9 +7,9 @@
         "port": 5000,
         "channels": {
           "incline": {
-            "pattern": "^incline\\.pitch: (-?\\d+(?:\\.\\d+)?)",
+            "pattern": "^incline\\.grade: (-?\\d+(?:\\.\\d+)?)",
             "scale": 1.0,
-            "unit": "deg"
+            "unit": "%"
           },
           "belt_speed": {
             "pattern": "^tach\\.mph: (-?\\d+(?:\\.\\d+)?)",

@@ -18,11 +18,14 @@ import type { Sample, TelemetrySource } from './types.js';
  *   { "u01": { "kind": "treadmill", "endpoints": [
  *       { "host": "testingraspberryzero2.local", "port": 5000,
  *         "channels": {
- *           "incline":    { "pattern": "^incline\\.pitch: (-?\\d+(?:\\.\\d+)?)", "unit": "deg" },
+ *           "incline":    { "pattern": "^incline\\.grade: (-?\\d+(?:\\.\\d+)?)", "unit": "%" },
  *           "belt_speed": { "pattern": "^tach\\.mph: (-?\\d+(?:\\.\\d+)?)",     "unit": "mph" }
  *         } } ] } }
  *
- * Group 1 of `pattern` is the value; `scale` (default 1) multiplies it. Address
+ * Group 1 of `pattern` is the value; `scale` (default 1) multiplies it, and
+ * `unit` labels what the channel receives AFTER scaling. The twin's incline
+ * channel is percent grade, NOT degrees of pitch — consume `incline.grade`
+ * (100·tan(pitch), emitted by the Pi firmware), not `incline.pitch`. Address
  * Pis by their mDNS `.local` name rather than a DHCP IP.
  */
 

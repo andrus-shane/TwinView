@@ -7,6 +7,8 @@ tach as newline-delimited channel lines over a TCP server, for TwinView's
 `net` telemetry source to dial into:
 
     incline.roll/pitch/yaw/temp   WT901 regs 0x3D..0x40 (int16 LE), same scaling
+    incline.grade                 100*tan(pitch) — percent grade, what TwinView's
+                                  incline channel consumes (network_sensors.json)
     tach.hz/dir/count/mph/dist    quadrature decode (x4), same math + constants
                                   as the sketch (PULSES_PER_REV=600, wheel 0.50 m)
 
@@ -23,6 +25,7 @@ Which color is A vs B only sets the direction sign — flip INVERT_DIR if belt
 distance/speed counts backwards.
 """
 
+import math
 import socket
 import struct
 import threading
@@ -181,6 +184,7 @@ def main():
             roll, pitch, yaw, temp = imu
             lines.append(f"incline.roll: {roll:.2f}")
             lines.append(f"incline.pitch: {pitch:.2f}")
+            lines.append(f"incline.grade: {100.0 * math.tan(math.radians(pitch)):.2f}")
             lines.append(f"incline.yaw: {yaw:.2f}")
             lines.append(f"incline.temp: {temp:.2f}")
         lines.append(f"tach.hz: {abs_hz:.1f}")

@@ -12,7 +12,14 @@ import type { Sample, TelemetrySource } from './types.js';
  *                    "pattern": "Pitch:\\s*(-?\\d+(?:\\.\\d+)?)",
  *                    "scale": 1.0, "unit": "deg" } | null }
  *
- * Sensors stream newline-delimited text; group 1 of `pattern` is the value.
+ * Sensors stream newline-delimited text; group 1 of `pattern` is the value,
+ * `scale` multiplies it into the channel's native unit, and `unit` labels the
+ * post-scale value. The incline channel is percent grade, but the rig-monitor
+ * sketch flashed on the bench Mega may only report WT901 pitch in degrees —
+ * hence scale 1.7453293 (100·π/180, the small-angle tan() conversion, within
+ * 0.11 grade-points of exact over -3..15 %) in `treadmill_sensors.json`.
+ * Switch that channel to `^incline\.grade:` at scale 1 once the flashed sketch
+ * is confirmed to emit it (the Pi firmware already does).
  * Multiple channels may share one physical port (e.g. one Arduino Mega
  * emitting both inclinometer and tachometer lines).
  *
