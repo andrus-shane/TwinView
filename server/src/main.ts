@@ -10,6 +10,7 @@ import {
   type RigConfig,
   type ServerMessage,
 } from '@twinview/shared';
+import { AutomationBridge } from './automation.js';
 import { Fleet } from './fleet.js';
 import { SerialSource, loadSerialConfig } from './sources/serial.js';
 import type { TelemetrySource } from './sources/types.js';
@@ -42,6 +43,14 @@ interface AppConfig {
     /** Assign the remaining connected tablets to unpinned bays in order (default on) */
     autoScreens?: boolean;
   };
+  automation?: {
+    /** TabletAutoTest checkout the runner command executes in */
+    dir?: string;
+    /** argv template for one workflow run; {workflowId} and {serial} are substituted */
+    command?: string[];
+    /** Run logs + active-runs.json (default: <repo>/automation-logs) */
+    logsDir?: string;
+  };
 }
 
 const config: AppConfig = existsSync(CONFIG_PATH)
@@ -69,6 +78,31 @@ const fleet = new Fleet({
   autorun: config.fleet?.autorun ?? true,
   seedFaults: config.fleet?.seedFaults ?? true,
   serialSource,
+  // Deferred closure: `automation` is constructed just below (it needs the fleet
+  // for event logging) and is never queried before the engines start ticking.
+  automationRunning: (unitId) => automation.isRunning(unitId),
+});
+
+// --- TabletAutoTest bridge: workflow runs against a bay's tablet console.
+// Runs are detached and survive TwinView restarts; active ones are re-adopted
+// from automation-logs/active-runs.json on boot (see automation.ts).
+const automation = new AutomationBridge({
+  logsDir: resolve(ROOT, config.automation?.logsDir ?? 'automation-logs'),
+  command: config.automation?.command,
+  cwd: config.automation?.dir,
+  onEvent: (run, phase) => {
+    const engine = fleet.get(run.unitId)?.engine;
+    if (!engine) return;
+    if (phase === 'started') {
+      engine.logEvent('system', 'info', `Automation run started: ${run.workflowId} (pid ${run.pid})`);
+    } else if (phase === 'adopted') {
+      engine.logEvent('system', 'info', `Automation run re-adopted after restart: ${run.workflowId} (pid ${run.pid})`);
+    } else {
+      const sev = run.status === 'passed' ? 'info' : run.status === 'failed' ? 'warn' : 'fail';
+      const exit = run.exitCode !== null ? ` (exit ${run.exitCode})` : '';
+      engine.logEvent('system', sev, `Automation run ${run.status}: ${run.workflowId}${exit}`);
+    }
+  },
 });
 
 // --- Model catalog: legacy current.glb (treadmill) + any <MODEL>.glb dropped
@@ -220,6 +254,33 @@ app.post<{ Params: { id: string }; Body: { active: boolean } }>(
       return reply.code(404).send({ error: `unknown unit or not autorunnable: ${req.params.id}` });
     }
     return { ok: true };
+  },
+);
+
+// --- TabletAutoTest automation runs (see AutomationBridge) ---
+
+app.get('/api/automation/runs', async () => automation.runs());
+
+app.get<{ Params: { id: string } }>('/api/units/:id/automation', async (req, reply) => {
+  if (!fleet.get(req.params.id)) return reply.code(404).send({ error: `unknown unit: ${req.params.id}` });
+  return automation.runFor(req.params.id) ?? { status: 'idle' };
+});
+
+app.post<{ Params: { id: string }; Body: { workflowId: string } }>(
+  '/api/units/:id/automation/start',
+  async (req, reply) => {
+    const u = fleet.get(req.params.id);
+    if (!u) return reply.code(404).send({ error: `unknown unit: ${req.params.id}` });
+    const workflowId = req.body?.workflowId;
+    if (!workflowId) return reply.code(400).send({ error: 'workflowId required' });
+    if (!u.info.screenSerial) {
+      return reply.code(409).send({ error: 'no tablet console assigned to this bay' });
+    }
+    try {
+      return automation.start(req.params.id, workflowId, u.info.screenSerial);
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
+    }
   },
 );
 

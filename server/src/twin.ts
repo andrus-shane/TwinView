@@ -38,6 +38,18 @@ const EVENT_BUFFER = 200;
 const EVENTS_IN_STATE = 50;
 /** History depth for CSV export: 10 min @ 10 Hz */
 const HISTORY_MAX = 6000;
+/** Unattended-motion watchdog: motion with nobody in charge must persist this
+ * long before the alarm — coast-downs and server restarts get a grace window. */
+const WATCHDOG_GRACE_MS = 10_000;
+
+/** The measured channel that proves the machine is physically moving, per kind.
+ * Thresholds sit several sigmas above idle sensor noise. */
+const MOTION_CHANNELS: Record<MachineKind, { id: ChannelId; min: number }> = {
+  treadmill: { id: 'belt_speed', min: 0.2 },
+  rower: { id: 'flywheel_speed', min: 30 },
+  elliptical: { id: 'stride_rate', min: 2 },
+  pilates: { id: 'rep_rate', min: 2 },
+};
 
 interface ChannelSpec {
   label: string;
@@ -214,11 +226,16 @@ export class TwinEngine {
   private listeners = new Set<(s: TwinState) => void>();
   private eventListeners = new Set<(e: TwinEvent) => void>();
   private lastTick = Date.now();
+  /** When unattended motion was first seen; 0 = none */
+  private watchdogSince = 0;
+  private watchdogAlarmed = false;
 
   constructor(
     private source: TelemetrySource,
     private getFaults: () => Record<FaultId, boolean>,
     private kind: MachineKind = 'treadmill',
+    /** Is an external automation run (TabletAutoTest) driving this unit? See FleetOptions.automationRunning. */
+    private automationRunning: () => boolean = () => false,
   ) {
     this.channelIds = CHANNELS_BY_KIND[kind];
     for (const id of this.channelIds) this.status[id] = 'ok';
@@ -355,6 +372,8 @@ export class TwinEngine {
       this.applyStatus(id, target, now, dev, spec);
     }
 
+    this.watchdogTick(now);
+
     // History for CSV export
     const values = {} as HistoryRow['values'];
     for (const id of this.channelIds) {
@@ -368,6 +387,41 @@ export class TwinEngine {
 
     const state = this.getState();
     for (const fn of this.listeners) fn(state);
+  }
+
+  /**
+   * Safety watchdog: measured motion on the machine while nobody is in charge —
+   * no scenario, no operator setpoint, and no automation run (threaded in via
+   * FleetOptions.automationRunning) — raises an UNATTENDED MOTION alarm after a
+   * grace period. The grace covers coast-down after a stop and the moments
+   * around a server restart while the automation bridge re-adopts live runs.
+   */
+  watchdogTick(now: number): void {
+    const motion = MOTION_CHANNELS[this.kind];
+    const sample = this.source.latest(motion.id);
+    // A stale sample can't prove motion — no alarm on dead sensors.
+    const value = sample && now - sample.t <= STALE_MS ? sample.value : 0;
+    const moving = value > motion.min;
+    const attended = this.scenario !== null || this.setpoints.speed > 0 || this.automationRunning();
+    if (!moving || attended) {
+      if (this.watchdogAlarmed) this.logEvent('system', 'info', 'Unattended-motion alarm cleared');
+      this.watchdogSince = 0;
+      this.watchdogAlarmed = false;
+      return;
+    }
+    if (this.watchdogSince === 0) {
+      this.watchdogSince = now;
+      return;
+    }
+    if (!this.watchdogAlarmed && now - this.watchdogSince >= WATCHDOG_GRACE_MS) {
+      this.watchdogAlarmed = true;
+      const spec = CHANNEL_SPECS[this.kind][motion.id]!;
+      this.logEvent(
+        motion.id,
+        'fail',
+        `UNATTENDED MOTION: ${spec.label.toLowerCase()} ${value.toFixed(1)} ${spec.unit} with no scenario, operator setpoint, or automation run in charge`,
+      );
+    }
   }
 
   private applyStatus(id: ChannelId, target: ChannelStatus, now: number, dev: number, spec: ChannelSpec): void {

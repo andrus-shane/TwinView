@@ -223,6 +223,31 @@ never from nominal step; machines stopping from high rates need 20+ s before the
 frame; agents analyzing stills WILL misattribute occluded/overlapping movers — verify
 against the live scene graph (`window.__viewer` hook) before trusting frame findings.
 
+## Update 2026-08-18 — TabletAutoTest bridge: restart-surviving runs + unattended-motion watchdog
+
+- `server/src/automation.ts` (AutomationBridge): launches TabletAutoTest workflow runs
+  against a bay's tablet console, spawned DETACHED (own process group, stdio → log file,
+  unref) so a TwinView restart never kills an in-flight run. Runner argv is a config
+  template (`config.json` → `automation: { dir, command, logsDir }`, placeholders
+  `{workflowId}`/`{serial}`); logs land in `automation-logs/` (gitignored).
+- **Restart recovery:** every active run is persisted to `automation-logs/active-runs.json`
+  (`unitId, workflowId, serial, pid, logPath, startedAt`) at spawn. On construction the
+  bridge reloads it, checks each pid with `process.kill(pid, 0)`, marks live ones
+  status=running, and liveness-polls every 3 s. On death it parses the log's trailing
+  `RESULT_JSON: {...}` line to derive passed/failed/error. **A re-adopted child's exit
+  code is unobservable** (it was reparented when the old server died) — `exitCode` stays
+  null and the outcome rests entirely on the RESULT_JSON trailer; no trailer = 'error'.
+  Dead entries are cleaned from the file.
+- **Unattended-motion watchdog** (`TwinEngine.watchdogTick`, threaded via
+  `FleetOptions.automationRunning`): measured motion (kind-specific channel, thresholds
+  several sigmas above idle noise) with no scenario, no operator setpoint, and no
+  automation run in charge raises an `UNATTENDED MOTION` fail event after a 10 s grace
+  (grace covers coast-downs and restart re-adoption). The persistence above exists
+  precisely so a server restart during a healthy run does NOT trip this alarm.
+- HTTP: `GET /api/automation/runs`, `GET /api/units/:id/automation` (`{status:'idle'}`
+  when none), `POST /api/units/:id/automation/start` `{workflowId}` (409 without an
+  assigned tablet console or with a run already in flight).
+
 ## Update 2026-07-10 (second machine, later the same day)
 
 - Dev environment stood up and verified end-to-end with mock data on this machine: Node 24 LTS installed per-user (`%LOCALAPPDATA%\Programs\nodejs`, on user PATH — the MSI needs admin, the zip distribution doesn't), pywin32 installed, `npm install` clean. Verified via API: health, live 10Hz state, quick_check scenario, belt_slip inject → warn → FAIL → clear → recovery events, CSV export (1900+ rows), rig persistence, Vite page serving. Note: both servers bind IPv4/localhost quirks — use `http://localhost:5173` for Vite (it binds ::1) and `http://127.0.0.1:8720` for the API (it binds IPv4 only).

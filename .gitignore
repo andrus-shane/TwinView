@@ -13,3 +13,6 @@ __pycache__/
 models/_devshot.png
 /twinview-demo.webm
 demo-video/
+
+# automation run logs + active-run registry (runtime state)
+automation-logs/

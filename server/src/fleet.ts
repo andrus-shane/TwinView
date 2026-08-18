@@ -29,6 +29,12 @@ export interface FleetOptions {
   seedFaults: boolean;
   /** Real hardware source — becomes bay 1, exempt from autorun and fault injection */
   serialSource?: TelemetrySource;
+  /**
+   * Is an external automation run (TabletAutoTest) currently driving this unit?
+   * Feeds each engine's unattended-motion watchdog: measured motion with no
+   * scenario, no operator setpoint, and no automation run trips the alarm.
+   */
+  automationRunning?: (unitId: string) => boolean;
 }
 
 interface Unit {
@@ -100,7 +106,12 @@ export class Fleet {
       const mock = isSerial ? null : new MockSource(() => unit.engine!.setpoints, kind);
       unit.mock = mock;
       unit.source = isSerial ? opts.serialSource! : mock!;
-      unit.engine = new TwinEngine(unit.source, () => (mock ? mock.faults : NO_FAULTS), kind);
+      unit.engine = new TwinEngine(
+        unit.source,
+        () => (mock ? mock.faults : NO_FAULTS),
+        kind,
+        () => opts.automationRunning?.(id) ?? false,
+      );
       unit.engine.onEvent((e) => {
         for (const fn of this.eventListeners) fn({ ...e, unitId: id });
       });
