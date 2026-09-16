@@ -4,6 +4,6 @@
   "netConfigPath": "network_sensors.json",
   "port": 8720,
   "automation": { "repo": "../TabletAutoTest" },
-  "fleet": { "screens": { "u01": "127.0.0.1:5555" }, "models": { "u03": "NTL17915" }, "channels": { "u03": ["belt_speed", "incline"] } },
+  "fleet": { "screens": { "u01": "127.0.0.1:5555" }, "models": { "u03": "NTL17915", "u05": "NTL17624" }, "channels": { "u03": ["belt_speed", "incline"] } },
   "_comment": "source: 'mock' | 'serial'. serial reads the bench Arduino Mega (rig-monitor sketch, COM11 @ 115200) into bay 1; netConfigPath feeds units from the Pi TCP rigs (net wins over serial for the same unit). belt_speed scale is a placeholder (raw Hz) until the encoder PPR is known. automation.repo points at the TabletAutoTest checkout so real bays can launch its workflows from Test Control."
 }

@@ -78,6 +78,154 @@ export function towerTest(machineBox: THREE.Box3): (partBox: THREE.Box3) => bool
   return (b) => b.min.x - cx >= outboard || b.max.x - cx <= -outboard || b.max.y >= lowTopY;
 }
 
+/** Oriented-box fit of a flat panel (console tablet) in world space. */
+interface PanelFit {
+  center: THREE.Vector3;
+  /** screen +u (viewer's right) */
+  right: THREE.Vector3;
+  /** screen +v (top of the screen) */
+  up: THREE.Vector3;
+  /** out of the glass toward the viewer */
+  normal: THREE.Vector3;
+  width: number;
+  height: number;
+  depth: number;
+}
+
+/**
+ * Eigen-decomposition of a symmetric 3x3 matrix by cyclic Jacobi rotations.
+ * Three off-diagonals converge in a handful of sweeps; returns eigenvalues
+ * with their unit eigenvectors in matching order.
+ */
+function symmetricEigen3(a: number[][]): { values: number[]; vectors: THREE.Vector3[] } {
+  const m = a.map((r) => r.slice());
+  const v = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  const pairs: [number, number][] = [
+    [0, 1],
+    [0, 2],
+    [1, 2],
+  ];
+  for (let sweep = 0; sweep < 50; sweep++) {
+    const off = Math.abs(m[0][1]) + Math.abs(m[0][2]) + Math.abs(m[1][2]);
+    const diag = Math.abs(m[0][0]) + Math.abs(m[1][1]) + Math.abs(m[2][2]);
+    if (off <= 1e-12 * diag) break;
+    for (const [p, q] of pairs) {
+      if (m[p][q] === 0) continue;
+      const theta = (m[q][q] - m[p][p]) / (2 * m[p][q]);
+      const t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1);
+      const s = t * c;
+      for (let k = 0; k < 3; k++) {
+        const mkp = m[k][p];
+        const mkq = m[k][q];
+        m[k][p] = c * mkp - s * mkq;
+        m[k][q] = s * mkp + c * mkq;
+      }
+      for (let k = 0; k < 3; k++) {
+        const mpk = m[p][k];
+        const mqk = m[q][k];
+        m[p][k] = c * mpk - s * mqk;
+        m[q][k] = s * mpk + c * mqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const vkp = v[k][p];
+        const vkq = v[k][q];
+        v[k][p] = c * vkp - s * vkq;
+        v[k][q] = s * vkp + c * vkq;
+      }
+    }
+  }
+  return {
+    values: [m[0][0], m[1][1], m[2][2]],
+    vectors: [0, 1, 2].map((j) => new THREE.Vector3(v[0][j], v[1][j], v[2][j])),
+  };
+}
+
+/**
+ * Fit an oriented box to a console panel's vertices. The thinnest principal
+ * axis of the point cloud is the screen normal: an axis-aligned bbox only
+ * describes an upright screen, and the elliptical/rower tablets lean back
+ * far enough that a +z-facing overlay sliced through the glass. "Up" is
+ * world +y flattened onto the panel, so a near-square screen (whose in-plane
+ * principal axes are arbitrary) still reads upright. The normal faces +z,
+ * where the user stands on every model; a screen lying nearly flat faces up.
+ * Meshes must have current world matrices.
+ */
+function fitPanel(meshes: THREE.Mesh[]): PanelFit | null {
+  let total = 0;
+  for (const m of meshes) total += m.geometry.getAttribute('position')?.count ?? 0;
+  if (total < 4) return null;
+  // dense CAD tessellations: a strided sample fits the same box in microseconds
+  const stride = Math.max(1, Math.ceil(total / 20000));
+  const pts: THREE.Vector3[] = [];
+  for (const m of meshes) {
+    const pos = m.geometry.getAttribute('position');
+    if (!pos) continue;
+    for (let i = 0; i < pos.count; i += stride) {
+      pts.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld));
+    }
+  }
+  const mean = new THREE.Vector3();
+  for (const p of pts) mean.add(p);
+  mean.divideScalar(pts.length);
+  let xx = 0;
+  let xy = 0;
+  let xz = 0;
+  let yy = 0;
+  let yz = 0;
+  let zz = 0;
+  for (const p of pts) {
+    const dx = p.x - mean.x;
+    const dy = p.y - mean.y;
+    const dz = p.z - mean.z;
+    xx += dx * dx;
+    xy += dx * dy;
+    xz += dx * dz;
+    yy += dy * dy;
+    yz += dy * dz;
+    zz += dz * dz;
+  }
+  const { values, vectors } = symmetricEigen3([
+    [xx, xy, xz],
+    [xy, yy, yz],
+    [xz, yz, zz],
+  ]);
+  let thin = 0;
+  for (let j = 1; j < 3; j++) if (values[j] < values[thin]) thin = j;
+  const normal = vectors[thin].clone();
+  if (!Number.isFinite(normal.lengthSq()) || normal.lengthSq() < 0.5) return null;
+  normal.normalize();
+  if (Math.abs(normal.z) > 0.2 ? normal.z < 0 : normal.y < 0) normal.negate();
+
+  // a flat-lying screen has no world-up in its plane: its top points away from the user
+  const up = new THREE.Vector3(0, 1, 0).addScaledVector(normal, -normal.y);
+  if (up.lengthSq() < 0.04) up.set(0, 0, -1).addScaledVector(normal, normal.z);
+  up.normalize();
+  const right = new THREE.Vector3().crossVectors(up, normal).normalize();
+
+  const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  const d = new THREE.Vector3();
+  for (const p of pts) {
+    d.subVectors(p, mean);
+    const r = d.dot(right);
+    const u = d.dot(up);
+    const n = d.dot(normal);
+    lo.set(Math.min(lo.x, r), Math.min(lo.y, u), Math.min(lo.z, n));
+    hi.set(Math.max(hi.x, r), Math.max(hi.y, u), Math.max(hi.z, n));
+  }
+  const center = mean
+    .clone()
+    .addScaledVector(right, (lo.x + hi.x) / 2)
+    .addScaledVector(up, (lo.y + hi.y) / 2)
+    .addScaledVector(normal, (lo.z + hi.z) / 2);
+  return { center, right, up, normal, width: hi.x - lo.x, height: hi.y - lo.y, depth: hi.z - lo.z };
+}
+
 /**
  * Applies twin state to the 3D model each frame: deck tilts to measured
  * incline (ghost frame shows commanded), belt flow moves at measured speed,
@@ -937,14 +1085,20 @@ export class RigAnimator {
       return;
     }
     // CAD tessellation has no UVs, so a mapped material renders nothing.
-    // Project a screen-sized overlay plane onto the panel's front face instead.
-    const bbox = new THREE.Box3().setFromObject(object);
-    const size = bbox.getSize(new THREE.Vector3());
-    const center = bbox.getCenter(new THREE.Vector3());
+    // Project a screen-sized overlay plane onto the panel's front face instead,
+    // posed on the panel's own axes so a tilted tablet still wears its screen.
+    const fit = fitPanel(meshes);
+    if (!fit) return;
     const mat = new THREE.MeshBasicMaterial({ map: this.consoleTex, toneMapped: false });
-    const plane = new THREE.Mesh(new THREE.PlaneGeometry(size.x * 0.94, size.y * 0.9), mat);
-    // the user stands on the deck at +z, so the screen faces +z
-    plane.position.copy(this.modelRoot.worldToLocal(new THREE.Vector3(center.x, center.y, bbox.max.z + 0.004)));
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(fit.width * 0.94, fit.height * 0.9), mat);
+    // PlaneGeometry faces +z with +y up: carry that basis onto (right, up,
+    // normal) at the front face, 4 mm off the glass. Posed in world space,
+    // stored modelRoot-local (the root sits at a lab bay offset).
+    const world = new THREE.Matrix4()
+      .makeBasis(fit.right, fit.up, fit.normal)
+      .setPosition(fit.center.clone().addScaledVector(fit.normal, fit.depth / 2 + 0.004));
+    const local = this.modelRoot.matrixWorld.clone().invert().multiply(world);
+    local.decompose(plane.position, plane.quaternion, plane.scale);
     plane.name = '__console_screen__';
     plane.userData.consoleScreen = true;
     this.screenOverlay = plane;
