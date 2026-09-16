@@ -30,6 +30,27 @@ export interface ModelEntry {
   default: boolean;
 }
 
+/** A TabletAutoTest workflow the server's automation bridge can launch */
+export interface AutomationWorkflow {
+  id: string;
+  name: string;
+  summary?: string;
+  category?: string;
+}
+
+/** Current-or-last automation run on a unit (see server automation.ts) */
+export interface AutomationRun {
+  workflowId: string;
+  serial: string;
+  unitId: string;
+  startedAt: number;
+  endedAt?: number;
+  status: 'running' | 'passed' | 'failed' | 'error';
+  exitCode?: number;
+  logPath: string;
+  result?: unknown;
+}
+
 /** Selected machine model, persisted across reloads; null = server default (treadmill). */
 const MODEL_KEY = 'twinview.model';
 export const savedModel = (): string | null => localStorage.getItem(MODEL_KEY);
@@ -52,6 +73,8 @@ interface Store {
   bindDialogOpen: boolean;
   /** Component level: x-ray everything but the selected part */
   isolateOn: boolean;
+  /** Full-screen viewport: all chrome hidden so the 3D view fills the window */
+  fullscreen: boolean;
 
   /** The selected model's rig — what the bind/layers editors write to */
   rig: RigConfig;
@@ -75,6 +98,7 @@ interface Store {
   select(node: string | null): void;
   setBindDialogOpen(open: boolean): void;
   setIsolateOn(on: boolean): void;
+  setFullscreen(on: boolean): void;
   /** Switch the viewed machine model (persists, then reloads to rebuild the scene) */
   selectModel(model: string): void;
 
@@ -90,6 +114,15 @@ interface Store {
   setSetpoints(sp: { speed?: number; incline?: number }): Promise<void>;
   toggleFault(fault: FaultId, active: boolean): Promise<void>;
   setAuto(active: boolean): Promise<void>;
+
+  /** TabletAutoTest bridge: catalog (fleet-wide), availability + run (focused unit) */
+  automationWorkflows: AutomationWorkflow[] | null;
+  automationAvailable: boolean | null;
+  automationRun: AutomationRun | null;
+  fetchAutomation(): Promise<void>;
+  refreshAutomationRun(): Promise<void>;
+  /** Returns a user-facing error message, or null on success */
+  runAutomation(workflowId: string): Promise<string | null>;
 }
 
 async function api(path: string, method = 'GET', body?: unknown): Promise<any> {
@@ -155,6 +188,7 @@ export const useStore = create<Store>((set, get) => {
   twin: null,
   bindDialogOpen: false,
   isolateOn: true,
+  fullscreen: false,
 
   rig: { model: 'NTL99925', bindings: [] },
   rigs: {},
@@ -207,12 +241,14 @@ export const useStore = create<Store>((set, get) => {
       selectedNode: null,
       bindDialogOpen: false,
       twin: id ? get().states[id] ?? null : null,
+      automationRun: null, // run state is unit-scoped; refetched on focus
     });
   },
 
   select: (selectedNode) => set({ selectedNode, bindDialogOpen: false }),
   setBindDialogOpen: (bindDialogOpen) => set({ bindDialogOpen }),
   setIsolateOn: (isolateOn) => set({ isolateOn }),
+  setFullscreen: (fullscreen) => set({ fullscreen }),
 
   selectModel: (model) => {
     if (get().modelInfo?.model === model) return;
@@ -322,6 +358,51 @@ export const useStore = create<Store>((set, get) => {
   setAuto: async (active) => {
     const unit = get().focusedUnitId;
     if (unit) await api(`/units/${unit}/auto`, 'POST', { active });
+  },
+
+  automationWorkflows: null,
+  automationAvailable: null,
+  automationRun: null,
+  fetchAutomation: async () => {
+    const unit = get().focusedUnitId;
+    if (!unit) return;
+    try {
+      const info = await api(`/units/${unit}/automation`);
+      set({ automationAvailable: !!info.available, automationRun: info.run ?? null });
+      if (info.available && get().automationWorkflows === null) {
+        try {
+          set({ automationWorkflows: await api('/automation/workflows') });
+        } catch {
+          set({ automationWorkflows: [] }); // bridge up but listing failed — show empty, not spinner
+        }
+      }
+    } catch {
+      set({ automationAvailable: false });
+    }
+  },
+  refreshAutomationRun: async () => {
+    const unit = get().focusedUnitId;
+    if (!unit) return;
+    try {
+      const info = await api(`/units/${unit}/automation`);
+      set({ automationRun: info.run ?? null, automationAvailable: !!info.available });
+    } catch {
+      /* transient poll failure — keep last known state */
+    }
+  },
+  runAutomation: async (workflowId) => {
+    const unit = get().focusedUnitId;
+    if (!unit) return 'no unit focused';
+    // plain fetch (not api()) so the server's error message survives non-2xx
+    const res = await fetch(`/api/units/${unit}/automation/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workflowId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return body?.error ?? `HTTP ${res.status}`;
+    set({ automationRun: body });
+    return null;
   },
   };
 });

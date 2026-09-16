@@ -168,6 +168,11 @@ export class RigAnimator {
   }[] = [];
   private consoleTex: THREE.CanvasTexture | null = null;
   private consoleTexSize = { w: 0, h: 0 };
+  /** Tap-through: when on, the CAD console overlay becomes raycastable so
+   * clicks on the live screen can resolve to texture UVs. Survives setRig —
+   * the overlay is rebuilt on every rig application. */
+  private screenInteract = false;
+  private screenOverlay: THREE.Mesh | null = null;
   private consoleFrame = -1; // last canvas frame uploaded to the GPU
   private disposables: { dispose(): void }[] = [];
   private overlays: THREE.Object3D[] = [];
@@ -927,6 +932,7 @@ export class RigAnimator {
         const mat = new THREE.MeshBasicMaterial({ map: this.consoleTex, toneMapped: false });
         this.disposables.push(mat);
         m.material = mat;
+        m.userData.consoleScreen = true;
       }
       return;
     }
@@ -940,10 +946,23 @@ export class RigAnimator {
     // the user stands on the deck at +z, so the screen faces +z
     plane.position.copy(this.modelRoot.worldToLocal(new THREE.Vector3(center.x, center.y, bbox.max.z + 0.004)));
     plane.name = '__console_screen__';
-    plane.raycast = () => undefined;
+    plane.userData.consoleScreen = true;
+    this.screenOverlay = plane;
+    this.applyScreenRaycast(plane);
     this.modelRoot.add(plane);
     this.overlays.push(plane);
     this.disposables.push(plane.geometry, mat);
+  }
+
+  /** The overlay stays unpickable unless tap-through wants console clicks. */
+  private applyScreenRaycast(plane: THREE.Mesh): void {
+    if (this.screenInteract) delete (plane as { raycast?: unknown }).raycast;
+    else plane.raycast = () => undefined;
+  }
+
+  setScreenInteract(on: boolean): void {
+    this.screenInteract = on;
+    if (this.screenOverlay) this.applyScreenRaycast(this.screenOverlay);
   }
 
   update(dt: number, state: TwinState | null): void {
@@ -1161,9 +1180,12 @@ export class RigAnimator {
         if (m.userData.__screenMat) {
           m.material = m.userData.__screenMat;
           delete m.userData.__screenMat;
+          delete m.userData.consoleScreen;
         }
       }
     }
+    // the console overlay (if any) is removed with the other overlays below
+    this.screenOverlay = null;
     // Give platform parts back to the assembly before the pivots go, or a GUI
     // rebind would silently delete the deck/belt/rollers from the scene.
     if (this.platformFrontPivot && this.platformRearPivot && this.platformParent) {

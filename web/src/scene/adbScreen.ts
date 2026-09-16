@@ -23,6 +23,7 @@ export class AdbScreen {
   private configured = false;
   private haveKey = false;
   private frames = 0;
+  private painted = false;
   private disposed = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -48,6 +49,7 @@ export class AdbScreen {
     this.params = [];
     this.configured = false;
     this.haveKey = false;
+    this.painted = false;
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = new VideoDecoder({
       output: (frame) => this.paint(frame),
@@ -158,7 +160,14 @@ export class AdbScreen {
     }
     this.g.drawImage(frame, 0, 0, w, h);
     frame.close();
+    this.painted = true;
     markCanvasFrame(this.canvas);
+  }
+
+  /** True once a real video frame has painted — banner frames don't count,
+   * so tap-through can't fire at coordinates the user isn't seeing. */
+  get hasVideo(): boolean {
+    return this.painted;
   }
 
   private banner(text: string): void {

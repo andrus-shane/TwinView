@@ -122,7 +122,10 @@ export class SerialSource implements TelemetrySource {
     for (const [channel, m] of this.matchers) {
       const hit = m.re.exec(line);
       if (hit?.[1] !== undefined) {
-        this.samples.set(channel, { t: Date.now(), value: parseFloat(hit[1]) * m.scale });
+        // The Arduino sketch doesn't stamp samples at the source — arrival is
+        // the best measurement time available, so t === tHost here.
+        const now = Date.now();
+        this.samples.set(channel, { t: now, tHost: now, value: parseFloat(hit[1]) * m.scale });
         return channel;
       }
     }

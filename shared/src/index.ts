@@ -154,7 +154,8 @@ export const SETPOINT_META: Record<MachineKind, { speed: SetpointAxisMeta; incli
 export interface TwinEvent {
   t: number;
   channel: ChannelId | 'system';
-  severity: 'info' | 'warn' | 'fail';
+  /** `alarm` = safety condition (belt moving with nobody in charge), above `fail` */
+  severity: 'info' | 'warn' | 'fail' | 'alarm';
   msg: string;
 }
 
@@ -172,6 +173,12 @@ export interface TwinState {
   faults: Record<FaultId, boolean>;
   /** Ring buffer of recent events, newest last */
   events: TwinEvent[];
+  /**
+   * Safety watchdog (real-hardware bays only): the machine is measurably moving
+   * while no automation run or scenario is in charge of it. Level-triggered —
+   * true for as long as the condition holds, driving the web's red banner.
+   */
+  unattended?: boolean;
 }
 
 /** Roles a 3D part can play in the twin visualization */

@@ -148,10 +148,10 @@ export class MockSource implements TelemetrySource {
     }
 
     const t = Date.now();
-    this.samples.set('belt_speed', { t, value: Math.max(0, beltSpeed + gauss(0.045)) });
-    this.samples.set('incline', { t, value: this.drive.incline + gauss(0.05) });
-    this.samples.set('motor_current', { t, value: Math.max(0, current + gauss(0.12)) });
-    this.samples.set('vibration', { t, value: Math.max(0, vib + gauss(0.012)) });
+    this.samples.set('belt_speed', { t, tHost: t, value: Math.max(0, beltSpeed + gauss(0.045)) });
+    this.samples.set('incline', { t, tHost: t, value: this.drive.incline + gauss(0.05) });
+    this.samples.set('motor_current', { t, tHost: t, value: Math.max(0, current + gauss(0.12)) });
+    this.samples.set('vibration', { t, tHost: t, value: Math.max(0, vib + gauss(0.012)) });
   }
 
   private tickRower(dtS: number): void {
@@ -184,10 +184,10 @@ export class MockSource implements TelemetrySource {
     }
 
     const t = Date.now();
-    this.samples.set('stroke_rate', { t, value: Math.max(0, strokeRate + gauss(0.25)) });
-    this.samples.set('flywheel_speed', { t, value: Math.max(0, flywheel + gauss(6)) });
-    this.samples.set('drive_power', { t, value: Math.max(0, power + gauss(2.2)) });
-    this.samples.set('resistance', { t, value: Math.max(0, this.rower.resistance + gauss(0.12)) });
+    this.samples.set('stroke_rate', { t, tHost: t, value: Math.max(0, strokeRate + gauss(0.25)) });
+    this.samples.set('flywheel_speed', { t, tHost: t, value: Math.max(0, flywheel + gauss(6)) });
+    this.samples.set('drive_power', { t, tHost: t, value: Math.max(0, power + gauss(2.2)) });
+    this.samples.set('resistance', { t, tHost: t, value: Math.max(0, this.rower.resistance + gauss(0.12)) });
   }
 
   private tickElliptical(dtS: number): void {
@@ -219,10 +219,10 @@ export class MockSource implements TelemetrySource {
     }
 
     const t = Date.now();
-    this.samples.set('stride_rate', { t, value: Math.max(0, strideRate + gauss(0.35)) });
-    this.samples.set('incline', { t, value: this.ell.incline + gauss(0.05) });
-    this.samples.set('drive_power', { t, value: Math.max(0, power + gauss(2.2)) });
-    this.samples.set('vibration', { t, value: Math.max(0, vib + gauss(0.015)) });
+    this.samples.set('stride_rate', { t, tHost: t, value: Math.max(0, strideRate + gauss(0.35)) });
+    this.samples.set('incline', { t, tHost: t, value: this.ell.incline + gauss(0.05) });
+    this.samples.set('drive_power', { t, tHost: t, value: Math.max(0, power + gauss(2.2)) });
+    this.samples.set('vibration', { t, tHost: t, value: Math.max(0, vib + gauss(0.015)) });
   }
 
   private tickPilates(dtS: number): void {
@@ -260,9 +260,9 @@ export class MockSource implements TelemetrySource {
     }
 
     const t = Date.now();
-    this.samples.set('rep_rate', { t, value: Math.max(0, repRate + gauss(0.2)) });
-    this.samples.set('carriage_travel', { t, value: Math.max(0, travel + gauss(0.8)) });
-    this.samples.set('drive_power', { t, value: Math.max(0, power + gauss(1.2)) });
-    this.samples.set('resistance', { t, value: Math.max(0, resistance + gauss(0.1)) });
+    this.samples.set('rep_rate', { t, tHost: t, value: Math.max(0, repRate + gauss(0.2)) });
+    this.samples.set('carriage_travel', { t, tHost: t, value: Math.max(0, travel + gauss(0.8)) });
+    this.samples.set('drive_power', { t, tHost: t, value: Math.max(0, power + gauss(1.2)) });
+    this.samples.set('resistance', { t, tHost: t, value: Math.max(0, resistance + gauss(0.1)) });
   }
 }

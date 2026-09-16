@@ -11,7 +11,14 @@
       "name": "twinview-web",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev:web"],
-      "port": 5173
+      "port": 5173,
+      "autoPort": true
+    },
+    {
+      "name": "docs-static-2",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8732", "--directory", "docs"],
+      "port": 8732
     }
   ]
 }

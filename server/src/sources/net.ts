@@ -27,6 +27,15 @@ import type { Sample, TelemetrySource } from './types.js';
  * channel is percent grade, NOT degrees of pitch — consume `incline.grade`
  * (100·tan(pitch), emitted by the Pi firmware), not `incline.pitch`. Address
  * Pis by their mDNS `.local` name rather than a DHCP IP.
+ *
+ * Timestamps: the Pi firmware suffixes every line with the sample's own
+ * CLOCK_MONOTONIC time (`tach.mph: 11.130 @123456789012345`, nanoseconds).
+ * That suffix is stripped before the channel patterns run, so configs never
+ * see it. The Pi clock has an arbitrary epoch and ~20 ppm drift, so each
+ * endpoint gets a {@link PiClockSync} that maps it onto the host timeline;
+ * the mapped time lands in `Sample.t` (use for interval/derivative math),
+ * while `Sample.tHost` keeps the raw arrival Date.now() (staleness watchdogs
+ * only). Lines from older firmware without the suffix fall back to t = tHost.
  */
 
 export interface NetChannelSpec {
@@ -90,12 +99,67 @@ interface Matcher {
   scale: number;
 }
 
+/** Firmware source-timestamp suffix: " @<CLOCK_MONOTONIC ns>" at end of line. */
+const TS_SUFFIX_RE = / @(\d+)$/;
+
+/** Pi-time window the min-delay offset is tracked over. Long enough that a few
+ * near-minimum-delay packets always land in it (Wi-Fi jitter is bursty, calm
+ * gaps are seconds apart); short enough that the Pi's ~20 ppm clock drift
+ * accumulates only ~2.4 ms across it, well under the jitter being filtered —
+ * the sliding window IS the skew tracking, so no explicit skew fit is needed. */
+const SYNC_WINDOW_MS = 120_000;
+/** An offset jump beyond this means the clock relation itself changed (Pi
+ * reboot resets CLOCK_MONOTONIC's epoch; host suffered an NTP step) — restart
+ * the fit rather than trusting a window that spans two different epochs. */
+const SYNC_RESET_MS = 10_000;
+
+/**
+ * Maps one Pi's CLOCK_MONOTONIC onto the host's Date.now() timeline.
+ *
+ * Every (t_pi, t_host) arrival pair overstates the offset by that packet's
+ * transport delay — Wi-Fi retries, TCP queuing, and read coalescing (several
+ * 10 ms samples sharing one arrival stamp) all push t_host late, never early.
+ * The true offset is therefore best estimated by the MINIMUM of
+ * t_host − t_pi over a sliding window: the least-delayed packet seen
+ * recently. Mapped absolute times carry that packet's residual delay as a
+ * small constant bias, but DIFFERENCES between mapped samples are exactly
+ * Pi-clock differences, which is what derivative math needs. (The bench
+ * Wi-Fi is isolated with no NTP path to the Pi; running chrony on the Pi
+ * pointed at this host would be the ops-side alternative to this fit.)
+ *
+ * Implemented as a monotonic deque (front = window minimum), O(1) amortized.
+ */
+class PiClockSync {
+  private deque: { tPi: number; delta: number }[] = [];
+  private offset: number | null = null;
+
+  /** Feed one arrival pair (both ms; tPi on the Pi clock, tHost = Date.now()). */
+  update(tPi: number, tHost: number): void {
+    const delta = tHost - tPi;
+    if (this.offset !== null && Math.abs(delta - this.offset) > SYNC_RESET_MS) {
+      this.deque.length = 0;
+      this.offset = null;
+    }
+    while (this.deque.length > 0 && this.deque[0].tPi < tPi - SYNC_WINDOW_MS) this.deque.shift();
+    while (this.deque.length > 0 && this.deque[this.deque.length - 1].delta >= delta) this.deque.pop();
+    this.deque.push({ tPi, delta });
+    this.offset = this.deque[0].delta;
+  }
+
+  /** Pi-clock ms → host-timeline Unix ms (identity + current offset estimate). */
+  toHostMs(tPi: number): number {
+    return tPi + (this.offset ?? 0);
+  }
+}
+
 export class NetSource implements TelemetrySource {
   readonly kind = 'net' as const;
 
   private samples = new Map<ChannelId, Sample>();
   private sockets = new Set<Socket>();
   private stopped = false;
+  /** One clock fit per Pi, persistent across reconnects (both clocks keep running). */
+  private syncs = new Map<NetEndpointSpec, PiClockSync>();
 
   constructor(private endpoints: NetEndpointSpec[]) {}
 
@@ -111,6 +175,11 @@ export class NetSource implements TelemetrySource {
       matchers.push({ channel: channel as ChannelId, re: new RegExp(spec.pattern), scale: spec.scale ?? 1 });
     }
     const label = `${ep.host}:${ep.port}`;
+    let sync = this.syncs.get(ep);
+    if (!sync) {
+      sync = new PiClockSync();
+      this.syncs.set(ep, sync);
+    }
     let buf = '';
 
     const socket = createConnection({ host: ep.host, port: ep.port });
@@ -131,7 +200,7 @@ export class NetSource implements TelemetrySource {
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
-        if (line) this.ingestLine(line, matchers);
+        if (line) this.ingestLine(line, matchers, sync);
       }
     });
     // 'error' always precedes 'close'; schedule the single retry from 'close'.
@@ -145,11 +214,25 @@ export class NetSource implements TelemetrySource {
   }
 
   /** Feed one raw line through this endpoint's matchers; returns the channel it hit. */
-  ingestLine(line: string, matchers: Matcher[]): ChannelId | null {
+  ingestLine(line: string, matchers: Matcher[], sync?: PiClockSync): ChannelId | null {
+    const tHost = Date.now();
+    // Peel the firmware's " @<ns>" source-timestamp suffix off BEFORE the
+    // channel patterns run — configs match the bare "channel: value" line
+    // (and stay compatible with $-anchored patterns and old firmware).
+    let t = tHost;
+    const stamp = TS_SUFFIX_RE.exec(line);
+    if (stamp) {
+      line = line.slice(0, stamp.index);
+      if (sync) {
+        const tPiMs = Number(stamp[1]) / 1e6;
+        sync.update(tPiMs, tHost);
+        t = sync.toHostMs(tPiMs);
+      }
+    }
     for (const m of matchers) {
       const hit = m.re.exec(line);
       if (hit?.[1] !== undefined) {
-        this.samples.set(m.channel, { t: Date.now(), value: parseFloat(hit[1]) * m.scale });
+        this.samples.set(m.channel, { t, tHost, value: parseFloat(hit[1]) * m.scale });
         return m.channel;
       }
     }

@@ -2,6 +2,7 @@ import {
   FAULT_IDS,
   FAULT_LABELS,
   FAULTS_BY_KIND,
+  type ChannelId,
   type FaultId,
   type MachineKind,
   type TwinState,
@@ -23,16 +24,31 @@ export interface FleetOptions {
   ellipticalModel: string;
   pilates: number;
   pilatesModel: string;
+  /** Per-bay CAD model override (unit id -> model id); wins over the kind default */
+  models?: Record<string, string>;
+  /**
+   * Per-bay channel subset (unit id -> channel ids). The twin tracks ONLY these — same
+   * mechanism real-hardware bays use, but for mock bays too (e.g. a treadmill twin that
+   * should only show belt speed + incline). Unknown ids for the kind are ignored.
+   */
+  channels?: Record<string, ChannelId[]>;
   /** Idle units start scenarios on their own (staggered) until an operator takes over */
   autorun: boolean;
   /** Inject a couple of deterministic faults shortly after boot so the lab view has detections to show */
   seedFaults: boolean;
   /**
    * Real-hardware units keyed by unit id (e.g. "u01"): the machine kind that
-   * bay runs and its telemetry source (serial or net). These bays are exempt
+   * bay runs, its telemetry source (serial or net), and which channels that
+   * source is configured to feed (the twin tracks ONLY those — no mock
+   * expected values for uninstrumented channels). These bays are exempt
    * from autorun and fault injection. Unit ids outside 1..size are ignored.
    */
-  realSources?: Map<string, { kind: MachineKind; source: TelemetrySource }>;
+  realSources?: Map<string, { kind: MachineKind; source: TelemetrySource; channels?: ChannelId[] }>;
+  /**
+   * Is a TabletAutoTest automation run currently active on this unit? Feeds the
+   * real bays' unattended-motion safety watchdog (see TwinEngine.watchdogTick).
+   */
+  automationRunning?: (unitId: string) => boolean;
 }
 
 interface Unit {
@@ -55,7 +71,9 @@ export class Fleet {
   private timers: ReturnType<typeof setInterval | typeof setTimeout>[] = [];
 
   constructor(private opts: FleetOptions) {
-    const real = opts.realSources ?? new Map<string, { kind: MachineKind; source: TelemetrySource }>();
+    const real =
+      opts.realSources ??
+      new Map<string, { kind: MachineKind; source: TelemetrySource; channels?: ChannelId[] }>();
     // 0-based bay indices backed by real hardware — they keep their declared
     // kind and never get a mock plant, autorun, or seeded faults.
     const realIdx = new Set<number>();
@@ -104,7 +122,7 @@ export class Fleet {
           bay,
           label: `Bay ${String(bay).padStart(2, '0')}`,
           serial: `SN-${SERIAL_PREFIX[kind]}${String(bay).padStart(3, '0')}`,
-          model: MODEL[kind],
+          model: opts.models?.[id] ?? MODEL[kind],
           kind,
           source: realEntry ? realEntry.source.kind : 'mock',
           auto: opts.autorun && !realEntry,
@@ -115,7 +133,13 @@ export class Fleet {
       const mock = realEntry ? null : new MockSource(() => unit.engine!.setpoints, kind);
       unit.mock = mock;
       unit.source = realEntry ? realEntry.source : mock!;
-      unit.engine = new TwinEngine(unit.source, () => (mock ? mock.faults : NO_FAULTS), kind);
+      unit.engine = new TwinEngine(
+        unit.source,
+        () => (mock ? mock.faults : NO_FAULTS),
+        kind,
+        opts.channels?.[id] ?? realEntry?.channels,
+        realEntry ? () => opts.automationRunning?.(id) ?? false : undefined,
+      );
       unit.engine.onEvent((e) => {
         for (const fn of this.eventListeners) fn({ ...e, unitId: id });
       });

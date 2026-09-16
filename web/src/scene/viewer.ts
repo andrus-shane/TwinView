@@ -151,6 +151,12 @@ interface CamAnim {
 export class Viewer {
   onSelectUnit: (unitId: string) => void = () => {};
   onSelectPart: (name: string | null) => void = () => {};
+  /** Tap-through: a click landed on the live console screen at this normalized
+   * position (origin top-left, matching device screen space). */
+  onScreenTap: (u: number, v: number) => void = () => {};
+  /** Swipe-through: a drag across the live console screen, start→end in the
+   * same normalized space, plus the gesture's real duration in ms. */
+  onScreenSwipe: (u1: number, v1: number, u2: number, v2: number, durMs: number) => void = () => {};
   onHover: (text: string | null) => void = () => {};
   /** Fired when the focused unit's model (CAD or proxy) is ready for the parts panel */
   onModelReady: (
@@ -169,6 +175,10 @@ export class Viewer {
   private clock = new THREE.Clock();
   private container!: HTMLElement;
   private downAt: { x: number; y: number } | null = null;
+  /** Active swipe-through gesture: a drag that began on the console screen.
+   * Orbit stays frozen until it ends; last* hold the newest on-screen uv so a
+   * drag that runs off the screen still ends at the edge it left through. */
+  private screenDrag: { id: number; x: number; y: number; t: number; u: number; v: number; lastU: number; lastV: number } | null = null;
   private disposed = false;
   private bgCss = '#0b0e13';
   private grid: THREE.GridHelper | null = null;
@@ -192,6 +202,7 @@ export class Viewer {
   private bayRigKeys = new Map<string, string>();
   private consoleCanvas: HTMLCanvasElement | null = null;
   private consoleWiredTo: RigAnimator | null = null;
+  private screenTapOn = false;
   private isolated: { mesh: THREE.Mesh; material: THREE.Material | THREE.Material[]; raycast: THREE.Mesh['raycast'] }[] | null = null;
   private camAnim: CamAnim | null = null;
 
@@ -235,14 +246,54 @@ export class Viewer {
     this.resize();
 
     const el = this.renderer.domElement;
-    el.addEventListener('pointerdown', (e) => (this.downAt = { x: e.clientX, y: e.clientY }));
+    el.addEventListener('pointerdown', (e) => {
+      this.downAt = { x: e.clientX, y: e.clientY };
+      // swipe-through: a drag that starts on the live console screen belongs
+      // to the device, not the camera — freeze orbit until the pointer lifts.
+      // (OrbitControls' own pointerdown already ran — registered first — but
+      // its pointermove checks `enabled` per event, so no rotation happens.)
+      if (this.screenTapOn && !this.screenDrag) {
+        const uv = this.screenUV(e);
+        if (uv) {
+          this.screenDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), ...uv, lastU: uv.u, lastV: uv.v };
+          this.controls.enabled = false;
+          el.setPointerCapture(e.pointerId); // keep move/up even off-canvas
+        }
+      }
+    });
     el.addEventListener('pointerup', (e) => {
+      const drag = this.screenDrag;
+      if (drag && e.pointerId === drag.id) {
+        this.endScreenDrag();
+        this.downAt = null;
+        const moved = Math.hypot(e.clientX - drag.x, e.clientY - drag.y);
+        // same threshold as unit/part picking: under it a drag is just a click
+        if (moved < 5) this.onScreenTap(drag.u, drag.v);
+        else this.onScreenSwipe(drag.u, drag.v, drag.lastU, drag.lastV, Math.round(performance.now() - drag.t));
+        return;
+      }
       if (!this.downAt) return;
       const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
       this.downAt = null;
       if (moved < 5) this.pick(e, true);
     });
-    el.addEventListener('pointermove', (e) => this.pick(e, false));
+    el.addEventListener('pointermove', (e) => {
+      const drag = this.screenDrag;
+      if (drag) {
+        if (e.pointerId !== drag.id) return;
+        const uv = this.screenUV(e);
+        if (uv) {
+          drag.lastU = uv.u;
+          drag.lastV = uv.v;
+        }
+        return; // no hover picking mid-gesture
+      }
+      this.pick(e, false);
+    });
+    el.addEventListener('pointercancel', (e) => {
+      if (this.screenDrag?.id === e.pointerId) this.endScreenDrag();
+      this.downAt = null;
+    });
     el.addEventListener('pointerleave', () => {
       for (const b of this.bayList) b.hovered = false;
       el.style.cursor = 'default';
@@ -589,6 +640,7 @@ export class Viewer {
     const prev = this.focusedId ? this.bays.get(this.focusedId) : null;
     if (prev) {
       if (this.consoleWiredTo) {
+        this.consoleWiredTo.setScreenInteract(false);
         this.consoleWiredTo.setConsoleCanvas(null);
         this.consoleWiredTo = null;
       }
@@ -764,12 +816,25 @@ export class Viewer {
     const bay = this.focusedId ? this.bays.get(this.focusedId) : null;
     if (!animator || !this.consoleCanvas || !bay) return;
     if (this.consoleWiredTo && this.consoleWiredTo !== animator) {
+      this.consoleWiredTo.setScreenInteract(false);
       this.consoleWiredTo.setConsoleCanvas(null);
     }
     animator.setConsoleCanvas(this.consoleCanvas);
+    // interact mode is animator-persistent; re-assert before setRig rebuilds
+    // the overlay so the fresh plane picks the right raycast behavior
+    animator.setScreenInteract(this.screenTapOn);
     const cad = this.focusedCad();
     animator.setRig(cad && animator === cad.entry.animator ? this.rigFor(bay.unit.model) : this.bayRig(bay));
     this.consoleWiredTo = animator;
+  }
+
+  /** Tap-through mode: clicks on the focused unit's console screen become
+   * device taps (onScreenTap) instead of part selection. */
+  setScreenInteract(on: boolean): void {
+    this.screenTapOn = on;
+    // disarmed mid-gesture (source/unit switch): don't leave orbit frozen
+    if (!on && this.screenDrag) this.endScreenDrag();
+    this.consoleWiredTo?.setScreenInteract(on);
   }
 
   /** Set the viewport background from a '#rrggbb' color; grid and shadow adapt to it. */
@@ -983,17 +1048,39 @@ export class Viewer {
     return true;
   }
 
-  private pick(e: PointerEvent, isClick: boolean): void {
+  /** First shown intersection under the pointer. Orbiting close to a unit can
+   * put a neighbor's invisible hull between the camera and the machine — if
+   * the ray reaches the focused unit at all, it wins. */
+  private hitAt(e: PointerEvent): THREE.Intersection | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hits = this.raycaster.intersectObjects(this.modelRoot.children, true).filter((h) => this.isShown(h.object));
-    // Orbiting close to a unit can put a neighbor's invisible hull between the
-    // camera and the machine — if the ray reaches the focused unit at all, it wins.
     const focusedHit = this.focusedId
-      ? hits.find((h) => this.bayFor(h.object)?.unit.id === this.focusedId)?.object ?? null
+      ? hits.find((h) => this.bayFor(h.object)?.unit.id === this.focusedId) ?? null
       : null;
-    const hit = focusedHit ?? hits[0]?.object ?? null;
+    return focusedHit ?? hits[0] ?? null;
+  }
+
+  /** Pointer position on the focused unit's console screen in device space
+   * (origin top-left), or null when the ray misses the screen. */
+  private screenUV(e: PointerEvent): { u: number; v: number } | null {
+    const hitI = this.hitAt(e);
+    if (!hitI?.uv || !hitI.object.userData.consoleScreen) return null;
+    const bay = this.bayFor(hitI.object);
+    if (!bay || bay.unit.id !== this.focusedId) return null;
+    // CanvasTexture flipY: texture v runs bottom-up, device y runs top-down
+    return { u: hitI.uv.x, v: 1 - hitI.uv.y };
+  }
+
+  private endScreenDrag(): void {
+    this.screenDrag = null;
+    this.controls.enabled = true;
+  }
+
+  private pick(e: PointerEvent, isClick: boolean): void {
+    const hitI = this.hitAt(e);
+    const hit = hitI?.object ?? null;
     const bay = hit ? this.bayFor(hit) : null;
 
     for (const b of this.bayList) b.hovered = false;
@@ -1014,6 +1101,18 @@ export class Viewer {
         bay.hovered = true;
         this.renderer.domElement.style.cursor = 'pointer';
         this.onHover(this.hoverText(bay));
+      }
+      return;
+    }
+
+    // tap-through: a click on the live console screen is a device tap, not a pick
+    if (this.screenTapOn && hitI?.uv && hit?.userData.consoleScreen) {
+      if (isClick) {
+        // CanvasTexture flipY: texture v runs bottom-up, device y runs top-down
+        this.onScreenTap(hitI.uv.x, 1 - hitI.uv.y);
+      } else {
+        this.renderer.domElement.style.cursor = 'crosshair';
+        this.onHover(null);
       }
       return;
     }

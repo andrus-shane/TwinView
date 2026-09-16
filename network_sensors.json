@@ -3,8 +3,9 @@
     "kind": "treadmill",
     "endpoints": [
       {
-        "host": "testingraspberryzero2.local",
+        "host": "127.0.0.1",
         "port": 5000,
+        "_note": "Pi is 192.168.1.134 (testingraspberryzero2.local) on the isolated bench Wi-Fi; 127.0.0.1:5000 is an adb tunnel through tablet SZ00000141 (adb forward tcp:5000 tcp:15000 + nc relay). Use the .local name directly once this box can reach the bench subnet.",
         "channels": {
           "incline": {
             "pattern": "^incline\\.grade: (-?\\d+(?:\\.\\d+)?)",

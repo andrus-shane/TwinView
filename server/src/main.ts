@@ -6,17 +6,28 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
   FAULT_IDS,
+  type ChannelId,
   type FaultId,
   type MachineKind,
   type RigConfig,
   type ServerMessage,
 } from '@twinview/shared';
+import { AutomationBridge } from './automation.js';
 import { Fleet } from './fleet.js';
 import { NetSource, loadNetConfig } from './sources/net.js';
 import { SerialSource, loadSerialConfig } from './sources/serial.js';
 import type { TelemetrySource } from './sources/types.js';
 import { SCENARIOS } from './scenarios.js';
-import { initScreens, isStreamProfile, listScreenDevices, ScreenStream } from './screens.js';
+import {
+  initScreens,
+  isStreamProfile,
+  listScreenDevices,
+  screensReady,
+  ScreenStream,
+  SERIAL_RE,
+  swipeDevice,
+  tapDevice,
+} from './screens.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..', '..');
@@ -45,6 +56,17 @@ interface AppConfig {
     screens?: Record<string, string>;
     /** Assign the remaining connected tablets to unpinned bays in order (default on) */
     autoScreens?: boolean;
+    /** Override a bay's CAD model: unit id -> model id from models/ (e.g. "u02": "NTL17915") */
+    models?: Record<string, string>;
+    /** Restrict a bay's tracked channels: unit id -> channel ids (e.g. "u03": ["belt_speed","incline"]) */
+    channels?: Record<string, string[]>;
+  };
+  /** Bridge to the TabletAutoTest repo (list + launch automation workflows) */
+  automation?: {
+    /** Checkout path, absolute or relative to the TwinView root (default ../TabletAutoTest) */
+    repo?: string;
+    /** Python used for tools/headless_runner.py (default: the repo's .venv, else "python") */
+    python?: string;
   };
 }
 
@@ -57,11 +79,19 @@ mkdirSync(MODELS_DIR, { recursive: true });
 // --- The lab fleet: N mock units; serial/net configs make specific bays real.
 // Legacy serial config → bay 1 (u01) treadmill on a COM port; the net config
 // declares real units by id, each aggregating one or more Pi TCP endpoints. ---
-const realSources = new Map<string, { kind: MachineKind; source: TelemetrySource }>();
+const realSources = new Map<
+  string,
+  { kind: MachineKind; source: TelemetrySource; channels: ChannelId[] }
+>();
 if (config.source === 'serial' && config.serialConfigPath) {
+  const serialCfg = loadSerialConfig(resolve(ROOT, config.serialConfigPath));
   realSources.set('u01', {
     kind: 'treadmill',
-    source: new SerialSource(loadSerialConfig(resolve(ROOT, config.serialConfigPath))),
+    source: new SerialSource(serialCfg),
+    // non-null entries are the instrumented channels; the twin tracks only those
+    channels: Object.entries(serialCfg)
+      .filter(([, spec]) => spec)
+      .map(([channel]) => channel as ChannelId),
   });
 }
 if (config.netConfigPath) {
@@ -70,9 +100,26 @@ if (config.netConfigPath) {
     if (realSources.has(unitId)) {
       console.warn(`[config] unit ${unitId} is defined by both serial and net config — using net`);
     }
-    realSources.set(unitId, { kind: spec.kind, source: new NetSource(spec.endpoints) });
+    const channels = new Set<ChannelId>();
+    for (const ep of spec.endpoints) {
+      for (const channel of Object.keys(ep.channels)) channels.add(channel as ChannelId);
+    }
+    realSources.set(unitId, {
+      kind: spec.kind,
+      source: new NetSource(spec.endpoints),
+      channels: [...channels],
+    });
   }
 }
+
+// Bridge to the TabletAutoTest repo: real bays can launch its automation
+// workflows on their assigned tablet console straight from Test Control.
+const automation = new AutomationBridge(
+  config.automation,
+  ROOT,
+  join(ROOT, 'automation-logs'),
+  `http://127.0.0.1:${config.port}`,
+);
 
 const fleet = new Fleet({
   size: Math.max(1, config.fleet?.size ?? 12),
@@ -84,9 +131,13 @@ const fleet = new Fleet({
   ellipticalModel: 'NTEL71426',
   pilates: config.fleet?.pilates ?? 2,
   pilatesModel: 'NTPL99926-6FW0',
+  models: config.fleet?.models,
+  channels: config.fleet?.channels as Record<string, ChannelId[]> | undefined,
   autorun: config.fleet?.autorun ?? true,
   seedFaults: config.fleet?.seedFaults ?? true,
   realSources,
+  // real bays' unattended-motion watchdog asks the bridge who's in charge
+  automationRunning: (unitId) => automation.status(unitId)?.status === 'running',
 });
 
 // --- Model catalog: legacy current.glb (treadmill) + any <MODEL>.glb dropped
@@ -241,6 +292,52 @@ app.post<{ Params: { id: string }; Body: { active: boolean } }>(
   },
 );
 
+// --- TabletAutoTest automation: catalog + per-unit launch/status ---
+
+app.get('/api/automation/workflows', async (_req, reply) => {
+  if (!automation.available()) {
+    return reply.code(503).send({
+      error: 'TabletAutoTest repo not found — set "automation.repo" in config.json',
+    });
+  }
+  try {
+    return await automation.listWorkflows();
+  } catch (err) {
+    return reply.code(502).send({ error: `workflow listing failed: ${err}` });
+  }
+});
+
+app.get<{ Params: { id: string } }>('/api/units/:id/automation', async (req, reply) => {
+  const u = fleet.get(req.params.id);
+  if (!u) return reply.code(404).send({ error: `unknown unit: ${req.params.id}` });
+  return {
+    available: automation.available(),
+    serial: u.info.screenSerial ?? null,
+    run: automation.status(req.params.id),
+  };
+});
+
+app.post<{ Params: { id: string }; Body: { workflowId: string } }>(
+  '/api/units/:id/automation/run',
+  async (req, reply) => {
+    const u = fleet.get(req.params.id);
+    if (!u) return reply.code(404).send({ error: `unknown unit: ${req.params.id}` });
+    if (!automation.available()) {
+      return reply.code(503).send({ error: 'TabletAutoTest repo not found' });
+    }
+    if (u.info.source === 'mock') {
+      return reply.code(409).send({ error: 'automation workflows target real hardware bays only' });
+    }
+    const serial = u.info.screenSerial;
+    if (!serial) {
+      return reply.code(409).send({ error: 'no tablet console assigned to this bay' });
+    }
+    const res = automation.run(req.params.id, req.body?.workflowId ?? '', serial);
+    if ('error' in res) return reply.code(409).send(res);
+    return res;
+  },
+);
+
 app.get<{ Params: { id: string } }>('/api/units/:id/export.csv', async (req, reply) => {
   const u = fleet.get(req.params.id);
   if (!u) return reply.code(404).send({ error: `unknown unit: ${req.params.id}` });
@@ -300,6 +397,65 @@ app.get('/api/screens', async () => {
   const devices = await listScreenDevices();
   await assignScreens(devices);
   return devices;
+});
+
+// Tap-through: forward a normalized screen position (u,v in [0,1], origin
+// top-left) as a real tap on the device. w/h = the streamed frame's pixel
+// dims, used to detect display rotation. Keyed on serial, not unit: the
+// Console Screen dropdown can show any device, not just the bay's own.
+app.post<{ Params: { serial: string }; Body: { u?: number; v?: number; w?: number; h?: number } }>(
+  '/api/screens/:serial/tap',
+  async (req, reply) => {
+    if (!screensReady()) return reply.code(503).send({ error: 'adb not available on this host' });
+    if (!SERIAL_RE.test(req.params.serial)) {
+      return reply.code(400).send({ error: 'invalid device serial' });
+    }
+    const { u, v, w, h } = req.body ?? {};
+    if (typeof u !== 'number' || typeof v !== 'number' || !Number.isFinite(u) || !Number.isFinite(v)) {
+      return reply.code(400).send({ error: 'u and v must be numbers in [0,1]' });
+    }
+    try {
+      const frame = typeof w === 'number' && typeof h === 'number' ? { w, h } : undefined;
+      const { x, y } = await tapDevice(req.params.serial, u, v, frame);
+      return { ok: true, x, y };
+    } catch (e) {
+      const msg = String((e as Error).message ?? e);
+      return reply.code(msg.includes('too many inputs') ? 409 : 502).send({ error: msg.slice(0, 200) });
+    }
+  },
+);
+
+// Swipe-through: forward a normalized drag (u1,v1)→(u2,v2) as a real swipe.
+// durMs is the on-screen gesture's real duration so flicks stay flicks;
+// the server clamps it to sane bounds. Same frame-rotation handling as tap.
+app.post<{
+  Params: { serial: string };
+  Body: { u1?: number; v1?: number; u2?: number; v2?: number; durMs?: number; w?: number; h?: number };
+}>('/api/screens/:serial/swipe', async (req, reply) => {
+  if (!screensReady()) return reply.code(503).send({ error: 'adb not available on this host' });
+  if (!SERIAL_RE.test(req.params.serial)) {
+    return reply.code(400).send({ error: 'invalid device serial' });
+  }
+  const { u1, v1, u2, v2, durMs, w, h } = req.body ?? {};
+  if (![u1, v1, u2, v2].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+    return reply.code(400).send({ error: 'u1/v1/u2/v2 must be numbers in [0,1]' });
+  }
+  try {
+    const frame = typeof w === 'number' && typeof h === 'number' ? { w, h } : undefined;
+    const res = await swipeDevice(
+      req.params.serial,
+      u1 as number,
+      v1 as number,
+      u2 as number,
+      v2 as number,
+      typeof durMs === 'number' ? durMs : NaN,
+      frame,
+    );
+    return { ok: true, ...res };
+  } catch (e) {
+    const msg = String((e as Error).message ?? e);
+    return reply.code(msg.includes('too many inputs') ? 409 : 502).send({ error: msg.slice(0, 200) });
+  }
 });
 
 // Per-model CAD info; no ?model= (or the default id) = legacy current.glb behavior.
@@ -376,7 +532,13 @@ app.register(async (scoped) => {
   );
 });
 
-fleet.onEvent((event) => broadcast({ type: 'event', event }));
+fleet.onEvent((event) => {
+  // safety alarms also land in the server log — the web UI may not be open
+  if (event.severity === 'alarm') {
+    console.error(`[SAFETY] ${event.unitId}: ${event.msg}`);
+  }
+  broadcast({ type: 'event', event });
+});
 fleet.onFleetChange(() =>
   broadcast({ type: 'fleet', units: fleet.units(), events: [] }),
 );

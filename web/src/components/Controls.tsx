@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { FAULT_LABELS, FAULTS_BY_KIND, SETPOINT_META } from '@twinview/shared';
+import { useEffect, useState } from 'react';
+import { FAULT_LABELS, FAULTS_BY_KIND, SETPOINT_META, type UnitInfo } from '@twinview/shared';
 import { useStore } from '../state/store';
 
 export function Controls() {
@@ -107,21 +107,108 @@ export function Controls() {
         />
       </label>
 
-      <div className="card-title sub">Fault Injection (mock)</div>
-      <div className="fault-grid">
-        {FAULTS_BY_KIND[kind].map((f) => {
-          const active = twin?.faults[f] ?? false;
-          return (
-            <button
-              key={f}
-              className={`btn fault ${active ? 'fault-active' : ''}`}
-              onClick={() => void toggleFault(f, !active)}
-            >
-              {FAULT_LABELS[f]}
-            </button>
-          );
-        })}
-      </div>
+      {unit?.source === 'mock' && (
+        <>
+          <div className="card-title sub">Fault Injection (mock)</div>
+          <div className="fault-grid">
+            {FAULTS_BY_KIND[kind].map((f) => {
+              const active = twin?.faults[f] ?? false;
+              return (
+                <button
+                  key={f}
+                  className={`btn fault ${active ? 'fault-active' : ''}`}
+                  onClick={() => void toggleFault(f, !active)}
+                >
+                  {FAULT_LABELS[f]}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {unit && unit.source !== 'mock' && <AutomationSection unit={unit} />}
     </div>
+  );
+}
+
+/**
+ * Real bays run TabletAutoTest workflows (rail-tap setpoints + sensor-verified
+ * tracking) on their assigned tablet console — the machine actually moves,
+ * unlike the twin-only scenarios above.
+ */
+function AutomationSection({ unit }: { unit: UnitInfo }) {
+  const workflows = useStore((s) => s.automationWorkflows);
+  const available = useStore((s) => s.automationAvailable);
+  const run = useStore((s) => s.automationRun);
+  const { fetchAutomation, refreshAutomationRun, runAutomation } = useStore.getState();
+  const [pick, setPick] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void fetchAutomation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unit.id]);
+
+  const running = run?.status === 'running';
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => void refreshAutomationRun(), 3000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, unit.id]);
+
+  const list = workflows ?? [];
+  const wfId = list.some((w) => w.id === pick) ? pick! : list[0]?.id ?? '';
+  const wf = list.find((w) => w.id === wfId);
+
+  const launch = async () => {
+    if (!wfId) return;
+    // the belt/deck really moves — make the operator own that click
+    if (!window.confirm(`Launch ${wfId} on tablet ${unit.screenSerial}?\nThe machine will move.`)) return;
+    setError(await runAutomation(wfId));
+  };
+
+  return (
+    <>
+      <div className="card-title sub">Automation · TabletAutoTest</div>
+      {available === false && (
+        <div className="auto-note">TabletAutoTest repo not reachable from the server.</div>
+      )}
+      {available && !unit.screenSerial && (
+        <div className="auto-note">No tablet console assigned to this bay.</div>
+      )}
+      {available && unit.screenSerial && (
+        <>
+          <div className="row">
+            <select
+              value={wfId}
+              onChange={(e) => setPick(e.target.value)}
+              disabled={running || !list.length}
+              title={wf?.summary}
+            >
+              {!list.length && <option value="">{workflows ? 'no workflows found' : 'loading…'}</option>}
+              {list.map((w) => (
+                <option key={w.id} value={w.id} title={w.summary}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+            <button className="btn primary" onClick={() => void launch()} disabled={running || !wfId}>
+              {running ? 'Running…' : 'Run'}
+            </button>
+          </div>
+          {run && (
+            <div className="auto-note">
+              {run.workflowId} on {run.serial}:{' '}
+              {run.status === 'running'
+                ? `running since ${new Date(run.startedAt).toLocaleTimeString()}`
+                : `${run.status.toUpperCase()} (exit ${run.exitCode}) at ${new Date(run.endedAt ?? 0).toLocaleTimeString()}`}
+            </div>
+          )}
+          {error && <div className="auto-note">{error}</div>}
+        </>
+      )}
+    </>
   );
 }

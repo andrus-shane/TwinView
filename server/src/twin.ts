@@ -39,6 +39,27 @@ const EVENTS_IN_STATE = 50;
 /** History depth for CSV export: 10 min @ 10 Hz */
 const HISTORY_MAX = 6000;
 
+/**
+ * Safety watchdog ("machine moving with nobody in charge") — real-hardware bays
+ * only. Independent of the warn/fail tolerance logic above: tolerances compare
+ * measured vs expected, so a dead automation run that leaves the belt at speed
+ * looks perfectly nominal to them (expected still mirrors the last setpoints).
+ * This instead asks: is the machine measurably MOVING while no automation run
+ * and no scenario claims it?
+ *
+ * Per kind: the measured channel that proves motion and the floor below which
+ * the machine counts as stopped. Treadmill only for now — it's the kind whose
+ * unattended motion is a safety hazard (incident 2026-08-18: adb transport lost
+ * mid-run, wrap-up never reached the console, belt kept running at ~13 mph).
+ */
+const MOTION_WATCH: Partial<Record<MachineKind, { channel: ChannelId; floor: number; unit: string }>> = {
+  treadmill: { channel: 'belt_speed', floor: 0.5, unit: 'mph' },
+};
+/** Motion must persist this long with no controller before the alarm raises. */
+const UNATTENDED_HOLD_MS = 5_000;
+/** After a run/scenario ends, allow this long for the belt to coast down. */
+const UNATTENDED_GRACE_MS = 10_000;
+
 interface ChannelSpec {
   label: string;
   unit: string;
@@ -215,12 +236,29 @@ export class TwinEngine {
   private eventListeners = new Set<(e: TwinEvent) => void>();
   private lastTick = Date.now();
 
+  // --- Unattended-motion watchdog state (see MOTION_WATCH) ---
+  private unattended = false;
+  /** When uncontrolled motion was first seen; 0 = not currently pending */
+  private unattendedSince = 0;
+  /** Coast-down grace deadline after a run/scenario ends */
+  private graceUntil = 0;
+  private wasAutomationRunning = false;
+
   constructor(
     private source: TelemetrySource,
     private getFaults: () => Record<FaultId, boolean>,
     private kind: MachineKind = 'treadmill',
+    instrumentedChannels?: ChannelId[],
+    /** Is a TabletAutoTest automation run currently driving this bay? */
+    private automationRunning?: () => boolean,
   ) {
-    this.channelIds = CHANNELS_BY_KIND[kind];
+    // Real-hardware bays only track the channels their sensor config
+    // actually feeds — the reference plant should never fabricate
+    // expected values (and NO DATA cards) for uninstrumented channels.
+    const all = CHANNELS_BY_KIND[kind];
+    this.channelIds = instrumentedChannels
+      ? all.filter((id) => instrumentedChannels.includes(id))
+      : all;
     for (const id of this.channelIds) this.status[id] = 'ok';
   }
 
@@ -260,7 +298,10 @@ export class TwinEngine {
   }
 
   stopScenario(): void {
-    if (this.scenario) this.logEvent('system', 'info', `Scenario stopped: ${this.scenario.label}`);
+    if (this.scenario) {
+      this.logEvent('system', 'info', `Scenario stopped: ${this.scenario.label}`);
+      this.graceUntil = Date.now() + UNATTENDED_GRACE_MS;
+    }
     this.scenario = null;
     this.setpoints = { speed: 0, incline: 0 };
   }
@@ -299,7 +340,11 @@ export class TwinEngine {
     for (const id of this.channelIds) {
       const spec = CHANNEL_SPECS[this.kind][id]!;
       const sample = this.source.latest(id);
-      const stale = !sample || now - sample.t > STALE_MS;
+      // Staleness is a link-health question — judge it on ARRIVAL time
+      // (tHost). sample.t is the measurement's source-clock time, for
+      // interval/derivative math only; on Pi-fed bays it can sit a clock-fit
+      // bias away from the host timeline and must not gate freshness.
+      const stale = !sample || now - sample.tHost > STALE_MS;
       channels[id] = {
         cmd: spec.expected(this.reference),
         meas: sample?.value ?? 0,
@@ -319,6 +364,7 @@ export class TwinEngine {
       channels,
       faults: { ...this.getFaults() },
       events: this.events.slice(-EVENTS_IN_STATE),
+      unattended: this.unattended,
     };
   }
 
@@ -334,6 +380,7 @@ export class TwinEngine {
         this.logEvent('system', 'info', `Scenario complete: ${this.scenario.label}`);
         this.scenario = null;
         this.setpoints = { speed: 0, incline: 0 };
+        this.graceUntil = now + UNATTENDED_GRACE_MS;
       } else {
         this.setpoints = scenarioSetpoints(this.scenario, elapsed);
       }
@@ -349,11 +396,13 @@ export class TwinEngine {
     for (const id of this.channelIds) {
       const spec = CHANNEL_SPECS[this.kind][id]!;
       const sample = this.source.latest(id);
-      if (!sample || now - sample.t > STALE_MS) continue;
+      if (!sample || now - sample.tHost > STALE_MS) continue;
       const dev = Math.abs(sample.value - spec.expected(this.reference));
       const target: ChannelStatus = dev > spec.failTol ? 'fail' : dev > spec.warnTol ? 'warn' : 'ok';
       this.applyStatus(id, target, now, dev, spec);
     }
+
+    this.watchdogTick(now);
 
     // History for CSV export
     const values = {} as HistoryRow['values'];
@@ -368,6 +417,55 @@ export class TwinEngine {
 
     const state = this.getState();
     for (const fn of this.listeners) fn(state);
+  }
+
+  /**
+   * Unattended-motion safety watchdog. Deliberately ignores setpoints and the
+   * reference plant: a run that dies mid-workflow leaves both mirroring the
+   * belt's actual speed, which is exactly the state that must alarm.
+   */
+  private watchdogTick(now: number): void {
+    const watch = MOTION_WATCH[this.kind];
+    if (!watch || this.source.kind === 'mock' || !this.channelIds.includes(watch.channel)) return;
+
+    const auto = this.automationRunning?.() ?? false;
+    // Run just ended → coast-down grace, same as scenario teardown
+    if (this.wasAutomationRunning && !auto) this.graceUntil = now + UNATTENDED_GRACE_MS;
+    this.wasAutomationRunning = auto;
+    const inCharge = auto || this.scenario !== null || now < this.graceUntil;
+
+    const sample = this.source.latest(watch.channel);
+    const fresh = sample !== null && now - sample.tHost <= STALE_MS;
+    const moving = fresh && sample.value > watch.floor;
+    // Hysteresis: clear only on a definitive near-zero reading. A stale link
+    // does NOT clear an active alarm — losing telemetry is no proof the belt
+    // stopped (the incident was precisely a dead transport over a moving belt).
+    const stopped = fresh && sample.value < watch.floor * 0.6;
+
+    if (!this.unattended) {
+      if (moving && !inCharge) {
+        if (this.unattendedSince === 0) this.unattendedSince = now;
+        if (now - this.unattendedSince >= UNATTENDED_HOLD_MS) {
+          this.unattended = true;
+          this.logEvent(
+            watch.channel,
+            'alarm',
+            `UNATTENDED MOTION: measured ${sample.value.toFixed(1)} ${watch.unit} with no active ` +
+              `automation run or scenario — machine is moving with nobody in charge`,
+          );
+        }
+      } else {
+        this.unattendedSince = 0;
+      }
+    } else if (inCharge || stopped) {
+      this.unattended = false;
+      this.unattendedSince = 0;
+      this.logEvent(
+        watch.channel,
+        'info',
+        `Unattended motion cleared: ${inCharge ? 'a controller took over' : 'machine stopped'}`,
+      );
+    }
   }
 
   private applyStatus(id: ChannelId, target: ChannelStatus, now: number, dev: number, spec: ChannelSpec): void {

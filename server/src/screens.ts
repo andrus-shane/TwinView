@@ -9,6 +9,9 @@ const run = promisify(execFile);
 
 const REMOTE_JAR = '/data/local/tmp/twinview-scrcpy-server.jar';
 
+/** adb serials: USB serials plus host:port network endpoints */
+export const SERIAL_RE = /^[\w.:-]+$/;
+
 /**
  * Encoder settings per stream use. Fixed server-side profiles rather than
  * client-supplied numbers, so a page can't ask 20 devices for full-rate video.
@@ -31,6 +34,8 @@ export interface ScreenDevice {
   serial: string;
   product: string;
   model: string;
+  /** Hardware serial, resolved for network (host:port) transports like the Pi USB bridge */
+  hwSerial?: string;
 }
 
 interface ScrcpyInstall {
@@ -101,7 +106,142 @@ export async function listScreenDevices(): Promise<ScreenDevice[]> {
     const attr = (key: string) => new RegExp(`${key}:(\\S+)`).exec(m[2])?.[1] ?? '';
     devices.push({ serial: m[1], product: attr('product'), model: attr('model') });
   }
+  // A network transport's adb serial is just host:port, which hides the
+  // hardware serial the UI labels devices by — ask the device for it.
+  await Promise.all(
+    devices
+      .filter((d) => d.serial.includes(':'))
+      .map(async (d) => {
+        try {
+          const { stdout: sn } = await run(
+            install!.adb,
+            ['-s', d.serial, 'shell', 'getprop', 'ro.serialno'],
+            { timeout: 3000 },
+          );
+          if (sn.trim()) d.hwSerial = sn.trim();
+        } catch {
+          /* device dropped mid-list — keep the endpoint serial */
+        }
+      }),
+  );
   return devices;
+}
+
+/** Whether adb + scrcpy-server were found (routes gate tap/stream on this). */
+export function screensReady(): boolean {
+  return !!install;
+}
+
+/** Device panel size per serial; an entry is dropped on tap failure so a
+ * swapped or re-provisioned display re-resolves on the next tap. */
+const sizeCache = new Map<string, { w: number; h: number }>();
+
+async function getDeviceSize(serial: string): Promise<{ w: number; h: number }> {
+  const cached = sizeCache.get(serial);
+  if (cached) return cached;
+  const { stdout } = await run(install!.adb, ['-s', serial, 'shell', 'wm', 'size'], { timeout: 3000 });
+  // "Physical size: 1280x800", optionally overridden by "Override size: WxH"
+  const m = /Override size:\s*(\d+)x(\d+)/.exec(stdout) ?? /Physical size:\s*(\d+)x(\d+)/.exec(stdout);
+  if (!m) throw new Error(`unparseable wm size: ${stdout.trim().slice(0, 80)}`);
+  const size = { w: parseInt(m[1], 10), h: parseInt(m[2], 10) };
+  sizeCache.set(serial, size);
+  return size;
+}
+
+/** One in-flight input chain per serial, shallow cap — a stale gesture landing
+ * seconds after a rage-click is worse than a dropped one. */
+const inputQueues = new Map<string, { chain: Promise<unknown>; pending: number }>();
+const INPUT_QUEUE_MAX = 4;
+
+/** `input swipe` duration bounds: below ~50 ms Android tends to drop the
+ * gesture; above 2 s it's a press-and-hold-drag nobody meant to send. */
+const SWIPE_DUR_MIN = 50;
+const SWIPE_DUR_MAX = 2000;
+
+async function queueInput<T>(serial: string, fn: () => Promise<T>): Promise<T> {
+  if (!install) throw new Error('adb not available');
+  if (!SERIAL_RE.test(serial)) throw new Error('invalid device serial');
+  const q = inputQueues.get(serial) ?? { chain: Promise.resolve(), pending: 0 };
+  if (q.pending >= INPUT_QUEUE_MAX) throw new Error('too many inputs in flight');
+  q.pending++;
+  inputQueues.set(serial, q);
+  const task = q.chain.then(fn);
+  q.chain = task.catch(() => {});
+  try {
+    return await task;
+  } catch (err) {
+    sizeCache.delete(serial); // device may have vanished or rotated
+    throw err;
+  } finally {
+    q.pending--;
+  }
+}
+
+/** Device pixel space for input coordinates. `frame` is the streamed video's
+ * dimensions: `wm size` reports the panel's natural orientation while `input`
+ * (and the scrcpy frame) follow the current rotation, so when the frame's
+ * aspect matches the swapped panel better, the input space is the rotated one. */
+async function inputSpace(serial: string, frame?: { w: number; h: number }): Promise<{ w: number; h: number }> {
+  let { w, h } = await getDeviceSize(serial);
+  if (frame && frame.w > 0 && frame.h > 0) {
+    const fr = frame.w / frame.h;
+    if (Math.abs(fr - h / w) < Math.abs(fr - w / h)) [w, h] = [h, w];
+  }
+  return { w, h };
+}
+
+const toPx = (n: number, extent: number) => Math.round(Math.min(Math.max(n, 0), 1) * (extent - 1));
+
+/**
+ * Send a real tap to a device at a normalized screen position (u,v in [0,1],
+ * origin top-left; see inputSpace for the rotation handling of `frame`).
+ */
+export async function tapDevice(
+  serial: string,
+  u: number,
+  v: number,
+  frame?: { w: number; h: number },
+): Promise<{ x: number; y: number }> {
+  if (!Number.isFinite(u) || !Number.isFinite(v)) throw new Error('u/v must be finite');
+  return queueInput(serial, async () => {
+    const { w, h } = await inputSpace(serial, frame);
+    const x = toPx(u, w);
+    const y = toPx(v, h);
+    // `input` cold-starts a Java shell on the device — generous timeout
+    await run(install!.adb, ['-s', serial, 'shell', 'input', 'tap', String(x), String(y)], {
+      timeout: 5000,
+    });
+    return { x, y };
+  });
+}
+
+/**
+ * Send a real swipe from (u1,v1) to (u2,v2) in normalized screen space,
+ * interpolated over durMs. Short durations read as flings, long ones as
+ * drags — callers pass the on-screen gesture's real duration to keep the
+ * device's momentum behavior matching what the user did.
+ */
+export async function swipeDevice(
+  serial: string,
+  u1: number,
+  v1: number,
+  u2: number,
+  v2: number,
+  durMs: number,
+  frame?: { w: number; h: number },
+): Promise<{ x1: number; y1: number; x2: number; y2: number; durMs: number }> {
+  if (![u1, v1, u2, v2].every(Number.isFinite)) throw new Error('u/v must be finite');
+  const dur = Math.round(Math.min(Math.max(Number.isFinite(durMs) ? durMs : 300, SWIPE_DUR_MIN), SWIPE_DUR_MAX));
+  return queueInput(serial, async () => {
+    const { w, h } = await inputSpace(serial, frame);
+    const args = [toPx(u1, w), toPx(v1, h), toPx(u2, w), toPx(v2, h), dur];
+    // `input swipe` blocks for the gesture's duration on top of shell cold-start
+    await run(install!.adb, ['-s', serial, 'shell', 'input', 'swipe', ...args.map(String)], {
+      timeout: 5000 + dur,
+    });
+    const [x1, y1, x2, y2] = args;
+    return { x1, y1, x2, y2, durMs: dur };
+  });
 }
 
 type OnData = (chunk: Buffer) => void;
@@ -128,7 +268,7 @@ export class ScreenStream {
 
   async start(onData: OnData, onEnd: OnEnd): Promise<void> {
     if (!install) throw new Error('scrcpy-server not found on this machine (install scrcpy)');
-    if (!/^[\w.:-]+$/.test(this.serial)) throw new Error('invalid device serial');
+    if (!SERIAL_RE.test(this.serial)) throw new Error('invalid device serial');
     await this.attempt(onData, onEnd);
   }
 

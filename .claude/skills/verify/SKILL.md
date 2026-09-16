@@ -29,3 +29,6 @@ Useful waits: `waitForFunction` on the model badge not containing `loading`, the
 - Playwright contexts default to emulating `prefers-color-scheme: light`; pass `colorScheme: 'dark'` if you need the OS-dark default path.
 - A single 404 console error (`/favicon.ico`) is pre-existing noise, not a regression.
 - The server's screen scan shells out to adb (see `server/src/screens.ts`); don't aggressively kill process trees — it can take the host adb daemon down (tablets re-enumerate in seconds, but active scrcpy streams die).
+- When driving the 3D scene by projecting a mesh to client coords (via `window.__viewer`), poll until the projection is stable AND `__viewer.camAnim` is null before synthesizing pointer events — the CAD hot-swap and fly-in keep moving meshes for seconds after focus, and a drag at stale coords orbits the camera (or picks a part) instead.
+- Multiple bays carry `userData.consoleScreen` meshes; filter by parent chain `unitId === __viewer.focusedId` or you'll project a neighbor's screen.
+- Headless Edge decodes the scrcpy H.264 stream via WebCodecs fine — live-console flows (tap/swipe-through with `hasVideo` gates) are fully testable headless.
