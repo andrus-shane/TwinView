@@ -134,7 +134,11 @@ Gotchas:
 bbox 0.79×1.22×2.06 m — a compact folding treadmill, console top at y≈1.07 m) +
 `models/NTL17624.manifest.json` + `models/rig.NTL17624.json` (belt, deck, both rollers and
 motor bound; `console_screen` left for the UI). Raw GLB 49.8 MB gitignored. Same pipeline and
-the same knobs as NTL17915: `SIMPLIFY_RATIO=0.75 CREASE_DEG=40`. Bay override
+the same knobs as NTL17915 plus one drop: `SIMPLIFY_RATIO=0.75 CREASE_DEG=40 DROP_NODES=150965-1#0`.
+The first `150965-1` instance (a motor-area bracket) floats unmated 0.4 m ahead of the hood at
+y=0.41 with nothing within 0.3 m — a CAD artifact, so `optimize_glb.mjs` grew `DROP_NODES`
+(`name` = every instance, `name#k` = k-th in GLB node order; defaults unchanged). With it gone the
+surviving instance is plain `150965-1` in the viewer (no `_1`), so the rig groups were fixed up. Bay override
 `config.json` → `fleet.models.u05 = "NTL17624"`.
 
 Source: `Downloads\17624\` — 148 loose files (no zip), root literally `~NTL17624.SLDASM`

@@ -37,10 +37,15 @@ const TINY_PART_RATIO = 0.0015;
  *                  (smooth) where adjacent faces meet under this angle and split (hard) above
  *                  it. Without it the GLB has no normals and the viewer's
  *                  computeVertexNormals() smooths across every edge, which on a coarse
- *                  tessellation reads as melted plastic. 0/unset = legacy (no normals). */
+ *                  tessellation reads as melted plastic. 0/unset = legacy (no normals).
+ *  DROP_NODES      comma-separated part names to leave out of the GLB, for CAD artifacts
+ *                  such as an unmated instance floating in space. `name` drops every
+ *                  instance; `name#k` drops only the k-th (0-based, GLB node order — the
+ *                  viewer names that instance `name` for k=0 and `name_k` otherwise). */
 const SIMPLIFY_RATIO = Number(process.env.SIMPLIFY_RATIO) || 0.35;
 const SIMPLIFY_ERROR = Number(process.env.SIMPLIFY_ERROR) || 0.002;
 const CREASE_DEG = Number(process.env.CREASE_DEG) || 0;
+const DROP_NODES = (process.env.DROP_NODES ?? '').split(',').map((x) => x.trim()).filter(Boolean);
 
 const io = new NodeIO()
   .registerExtensions([EXTMeshoptCompression])
@@ -175,6 +180,27 @@ for (const node of root.listNodes()) {
   }
 }
 console.log(`Dropped ${dropped} tiny parts (< ${(threshold * 1000).toFixed(1)} mm) — fasteners etc.`);
+
+// explicit drops (CAD artifacts), by name or name#instance
+if (DROP_NODES.length) {
+  const seen = new Map();
+  const hit = new Set();
+  for (const node of root.listNodes()) {
+    if (!node.getMesh()) continue;
+    const name = node.getName();
+    const k = seen.get(name) ?? 0;
+    seen.set(name, k + 1);
+    for (const spec of DROP_NODES) {
+      if (spec === name || spec === `${name}#${k}`) {
+        node.setMesh(null);
+        hit.add(spec);
+      }
+    }
+  }
+  console.log(`Dropped by DROP_NODES: ${[...hit].join(', ') || 'none'}`);
+  const miss = DROP_NODES.filter((d) => !hit.has(d));
+  if (miss.length) console.warn(`WARNING: DROP_NODES not found in model: ${miss.join(', ')}`);
+}
 
 let tris = 0;
 for (const mesh of root.listMeshes())
