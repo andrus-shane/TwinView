@@ -1,0 +1,13 @@
+[Unit]
+Description=Bridge the USB console adbd to fixed TCP port 5555
+Requires=adb-server.service
+After=adb-server.service
+
+[Service]
+ExecStart=/usr/local/sbin/adb_bridge.sh
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

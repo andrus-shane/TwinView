@@ -2,3 +2,7 @@
 # checkout platform's autocrlf setting.
 rig_monitor.py      text eol=lf
 rig-monitor.service text eol=lf
+adb_bridge.sh       text eol=lf
+adb-server.service  text eol=lf
+adb-bridge.service  text eol=lf
+setup_adb_bridge.sh text eol=lf
