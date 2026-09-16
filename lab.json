@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "align": "center",
+  "rows": [
+    {
+      "id": "r1",
+      "bays": [
+        {
+          "id": "u01",
+          "label": "Bay 01",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL99925"
+          }
+        },
+        {
+          "id": "u02",
+          "label": "Bay 02",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "rower",
+            "model": "FMRW0826-1D30"
+          }
+        },
+        {
+          "id": "u03",
+          "label": "Bay 03",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL17915"
+          }
+        },
+        {
+          "id": "u04",
+          "label": "Bay 04",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "rower",
+            "model": "FMRW0826-1D30"
+          }
+        }
+      ]
+    },
+    {
+      "id": "r2",
+      "bays": [
+        {
+          "id": "u05",
+          "label": "Bay 05",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL17624"
+          }
+        },
+        {
+          "id": "u06",
+          "label": "Bay 06",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "elliptical",
+            "model": "NTEL71426"
+          }
+        },
+        {
+          "id": "u07",
+          "label": "Bay 07",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "elliptical",
+            "model": "NTEL71426"
+          }
+        },
+        {
+          "id": "u08",
+          "label": "Bay 08",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL99925"
+          }
+        }
+      ]
+    },
+    {
+      "id": "r3",
+      "bays": [
+        {
+          "id": "u09",
+          "label": "Bay 09",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "pilates",
+            "model": "NTPL99926-6FW0"
+          }
+        },
+        {
+          "id": "u10",
+          "label": "Bay 10",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL99925"
+          }
+        },
+        {
+          "id": "u11",
+          "label": "Bay 11",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "pilates",
+            "model": "NTPL99926-6FW0"
+          }
+        },
+        {
+          "id": "u12",
+          "label": "Bay 12",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL99925"
+          }
+        }
+      ]
+    }
+  ]
+}

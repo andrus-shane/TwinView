@@ -4,28 +4,33 @@ import {
   FAULTS_BY_KIND,
   type ChannelId,
   type FaultId,
+  type LabBay,
+  type LabLayout,
   type MachineKind,
   type TwinState,
   type UnitEvent,
   type UnitInfo,
 } from '@twinview/shared';
+import { baysInOrder } from './lab.js';
 import { MockSource } from './sources/mock.js';
 import type { TelemetrySource } from './sources/types.js';
 import { scenariosForKind } from './scenarios.js';
 import { TwinEngine } from './twin.js';
 
+/**
+ * A real-hardware bay: the kind its sensor config declares, the channels that
+ * config feeds (the twin tracks ONLY those), and a factory for the source —
+ * sources can't restart after stop(), so re-placing a machine in a real bay
+ * builds a fresh one.
+ */
+export interface RealBaySpec {
+  kind: MachineKind;
+  channels: ChannelId[];
+  sourceKind: 'serial' | 'net';
+  makeSource(): TelemetrySource;
+}
+
 export interface FleetOptions {
-  size: number;
-  model: string;
-  /** How many bays hold non-treadmill machines (spread through the floor) */
-  rowers: number;
-  rowerModel: string;
-  ellipticals: number;
-  ellipticalModel: string;
-  pilates: number;
-  pilatesModel: string;
-  /** Per-bay CAD model override (unit id -> model id); wins over the kind default */
-  models?: Record<string, string>;
   /**
    * Per-bay channel subset (unit id -> channel ids). The twin tracks ONLY these — same
    * mechanism real-hardware bays use, but for mock bays too (e.g. a treadmill twin that
@@ -36,14 +41,8 @@ export interface FleetOptions {
   autorun: boolean;
   /** Inject a couple of deterministic faults shortly after boot so the lab view has detections to show */
   seedFaults: boolean;
-  /**
-   * Real-hardware units keyed by unit id (e.g. "u01"): the machine kind that
-   * bay runs, its telemetry source (serial or net), and which channels that
-   * source is configured to feed (the twin tracks ONLY those — no mock
-   * expected values for uninstrumented channels). These bays are exempt
-   * from autorun and fault injection. Unit ids outside 1..size are ignored.
-   */
-  realSources?: Map<string, { kind: MachineKind; source: TelemetrySource; channels?: ChannelId[] }>;
+  /** Real-hardware bays keyed by bay/unit id (e.g. "u01"); exempt from autorun and fault injection. */
+  real?: Map<string, RealBaySpec>;
   /**
    * Is a TabletAutoTest automation run currently active on this unit? Feeds the
    * real bays' unattended-motion safety watchdog (see TwinEngine.watchdogTick).
@@ -62,97 +61,137 @@ interface Unit {
 
 const NO_FAULTS = Object.fromEntries(FAULT_IDS.map((f) => [f, false])) as Record<FaultId, boolean>;
 
-/** Lab floor: N independently simulated units, each its own plant + twin engine. */
+const SERIAL_PREFIX: Record<MachineKind, string> = {
+  treadmill: 'A1',
+  rower: 'R2',
+  elliptical: 'E3',
+  pilates: 'P4',
+};
+
+/**
+ * Lab floor: the occupied bays of the lab layout, each an independently
+ * simulated (or real) unit with its own plant + twin engine. The roster is
+ * driven by {@link applyLayout} — bays gain and lose machines at run time.
+ */
 export class Fleet {
   private unitList: Unit[] = [];
   private byId = new Map<string, Unit>();
   private eventListeners = new Set<(e: UnitEvent) => void>();
   private fleetListeners = new Set<() => void>();
   private timers: ReturnType<typeof setInterval | typeof setTimeout>[] = [];
+  private started = false;
 
-  constructor(private opts: FleetOptions) {
-    const real =
-      opts.realSources ??
-      new Map<string, { kind: MachineKind; source: TelemetrySource; channels?: ChannelId[] }>();
-    // 0-based bay indices backed by real hardware — they keep their declared
-    // kind and never get a mock plant, autorun, or seeded faults.
-    const realIdx = new Set<number>();
-    for (const id of real.keys()) {
-      const bay = Number.parseInt(id.replace(/^u/, ''), 10);
-      if (Number.isInteger(bay) && bay >= 1 && bay <= opts.size) realIdx.add(bay - 1);
-    }
+  constructor(private opts: FleetOptions) {}
 
-    // Non-treadmill mock bays spread evenly through the floor ("into the mix"),
-    // never bay 1 and never a real-hardware bay.
-    const kindAt = new Map<number, MachineKind>();
-    const specials: MachineKind[] = [
-      ...Array<MachineKind>(Math.max(0, opts.rowers)).fill('rower'),
-      ...Array<MachineKind>(Math.max(0, opts.ellipticals)).fill('elliptical'),
-      ...Array<MachineKind>(Math.max(0, opts.pilates)).fill('pilates'),
-    ].slice(0, opts.size - 1);
-    specials.forEach((kind, k) => {
-      let idx = Math.floor(((k + 1) * opts.size) / (specials.length + 1));
-      for (let guard = 0; (kindAt.has(idx) || idx === 0 || realIdx.has(idx)) && guard < opts.size; guard++) {
-        idx = (idx + 1) % opts.size || 1;
-      }
-      if (!kindAt.has(idx) && idx !== 0 && !realIdx.has(idx)) kindAt.set(idx, kind);
+  /** Real-hardware bay ids → declared kind (layout validation coerces to these). */
+  realKinds(): Map<string, MachineKind> {
+    return new Map([...(this.opts.real ?? [])].map(([id, spec]) => [id, spec.kind]));
+  }
+
+  /**
+   * Make the roster match the layout's occupied bays: new machines are built,
+   * emptied bays torn down, a kind change rebuilds the unit (new plant), and a
+   * model/label/order change just updates the roster. Returns true if anything
+   * about the roster changed.
+   */
+  applyLayout(layout: LabLayout): boolean {
+    const bays = baysInOrder(layout);
+    const wanted = new Map<string, { bay: LabBay; ordinal: number }>();
+    bays.forEach((bay, i) => {
+      if (bay.machine) wanted.set(bay.id, { bay, ordinal: i + 1 });
     });
 
-    const MODEL: Record<MachineKind, string> = {
-      treadmill: opts.model,
-      rower: opts.rowerModel,
-      elliptical: opts.ellipticalModel,
-      pilates: opts.pilatesModel,
-    };
-    const SERIAL_PREFIX: Record<MachineKind, string> = {
-      treadmill: 'A1',
-      rower: 'R2',
-      elliptical: 'E3',
-      pilates: 'P4',
-    };
-
-    for (let i = 0; i < opts.size; i++) {
-      const bay = i + 1;
-      const id = `u${String(bay).padStart(2, '0')}`;
-      const realEntry = real.get(id);
-      const kind: MachineKind = realEntry ? realEntry.kind : kindAt.get(i) ?? 'treadmill';
-      const unit: Partial<Unit> = {
-        info: {
-          id,
-          bay,
-          label: `Bay ${String(bay).padStart(2, '0')}`,
-          serial: `SN-${SERIAL_PREFIX[kind]}${String(bay).padStart(3, '0')}`,
-          model: opts.models?.[id] ?? MODEL[kind],
-          kind,
-          source: realEntry ? realEntry.source.kind : 'mock',
-          auto: opts.autorun && !realEntry,
-        },
-        nextRunAt: 0,
-      };
-      // The mock plant reads its own engine's setpoints — forward ref via closure
-      const mock = realEntry ? null : new MockSource(() => unit.engine!.setpoints, kind);
-      unit.mock = mock;
-      unit.source = realEntry ? realEntry.source : mock!;
-      unit.engine = new TwinEngine(
-        unit.source,
-        () => (mock ? mock.faults : NO_FAULTS),
-        kind,
-        opts.channels?.[id] ?? realEntry?.channels,
-        realEntry ? () => opts.automationRunning?.(id) ?? false : undefined,
-      );
-      unit.engine.onEvent((e) => {
-        for (const fn of this.eventListeners) fn({ ...e, unitId: id });
-      });
-      this.unitList.push(unit as Unit);
-      this.byId.set(id, unit as Unit);
+    let changed = false;
+    for (const u of [...this.unitList]) {
+      const w = wanted.get(u.info.id);
+      if (!w || w.bay.machine!.kind !== u.info.kind) {
+        this.removeUnit(u.info.id, false);
+        changed = true;
+      }
     }
+    for (const { bay, ordinal } of wanted.values()) {
+      const u = this.byId.get(bay.id);
+      if (!u) {
+        this.addUnit(bay, ordinal);
+        changed = true;
+        continue;
+      }
+      const m = bay.machine!;
+      if (u.info.model !== m.model || u.info.label !== bay.label || u.info.bay !== ordinal) {
+        u.info.model = m.model;
+        u.info.label = bay.label;
+        u.info.bay = ordinal;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.unitList.sort((a, b) => a.info.bay - b.info.bay);
+      this.notifyFleet();
+    }
+    return changed;
+  }
+
+  private addUnit(bay: LabBay, ordinal: number): void {
+    const id = bay.id;
+    const real = this.opts.real?.get(id);
+    const kind: MachineKind = real ? real.kind : bay.machine!.kind;
+    const num = Number.parseInt(id.replace(/^\D+/, ''), 10);
+    const unit: Partial<Unit> = {
+      info: {
+        id,
+        bay: ordinal,
+        label: bay.label,
+        serial: `SN-${SERIAL_PREFIX[kind]}${String(Number.isInteger(num) ? num : ordinal).padStart(3, '0')}`,
+        model: bay.machine!.model,
+        kind,
+        source: real ? real.sourceKind : 'mock',
+        auto: this.opts.autorun && !real,
+      },
+      nextRunAt: 0,
+    };
+    // The mock plant reads its own engine's setpoints — forward ref via closure
+    const mock = real ? null : new MockSource(() => unit.engine!.setpoints, kind);
+    unit.mock = mock;
+    unit.source = real ? real.makeSource() : mock!;
+    unit.engine = new TwinEngine(
+      unit.source,
+      () => (mock ? mock.faults : NO_FAULTS),
+      kind,
+      this.opts.channels?.[id] ?? real?.channels,
+      real ? () => this.opts.automationRunning?.(id) ?? false : undefined,
+    );
+    unit.engine.onEvent((e) => {
+      for (const fn of this.eventListeners) fn({ ...e, unitId: id });
+    });
+    const full = unit as Unit;
+    this.unitList.push(full);
+    this.byId.set(id, full);
+    if (this.started) this.startUnit(full);
+  }
+
+  private startUnit(u: Unit): void {
+    void u.source.start();
+    u.engine.start();
+    // stagger the first autorun starts so the floor spins up within seconds, not in lockstep
+    if (u.info.auto) u.nextRunAt = Date.now() + (1 + Math.random() * 12) * 1000;
+  }
+
+  private removeUnit(id: string, notify = true): boolean {
+    const u = this.byId.get(id);
+    if (!u) return false;
+    u.engine.stop();
+    void u.source.stop();
+    this.byId.delete(id);
+    this.unitList = this.unitList.filter((x) => x !== u);
+    if (notify) this.notifyFleet();
+    return true;
   }
 
   async start(): Promise<void> {
+    this.started = true;
     for (const u of this.unitList) {
       await u.source.start();
       u.engine.start();
-      // stagger the first autorun starts so the floor spins up within seconds, not in lockstep
       if (u.info.auto) u.nextRunAt = Date.now() + (1 + Math.random() * 12) * 1000;
     }
     this.timers.push(setInterval(() => this.autorunTick(), 1000));
@@ -189,7 +228,7 @@ export class Fleet {
     return () => this.eventListeners.delete(fn);
   }
 
-  /** Fires when the roster changes (auto flags) so clients can refresh the fleet message. */
+  /** Fires when the roster changes (auto flags, bays placed/emptied) so clients can refresh the fleet message. */
   onFleetChange(fn: () => void): () => void {
     this.fleetListeners.add(fn);
     return () => this.fleetListeners.delete(fn);
@@ -288,13 +327,14 @@ export class Fleet {
 
   /** A few deterministic faults early on: the lab view should light up without operator help. */
   private scheduleSeedFaults(): void {
-    const seed = (idx: number, fault: FaultId, afterMs: number) => {
-      const u = this.unitList[idx];
+    // captured by id, not index: the roster can change before the timers fire
+    const seed = (u: Unit | undefined, fault: FaultId, afterMs: number) => {
       if (!u || !u.mock || !FAULTS_BY_KIND[u.info.kind].includes(fault)) return;
-      this.timers.push(setTimeout(() => this.setFault(u.info.id, fault, true), afterMs));
+      const id = u.info.id;
+      this.timers.push(setTimeout(() => this.setFault(id, fault, true), afterMs));
     };
-    const firstOf = (kind: MachineKind, minIdx = 0): number =>
-      this.unitList.findIndex((u, i) => i >= minIdx && u.info.kind === kind && !!u.mock);
+    const firstOf = (kind: MachineKind, minIdx = 0): Unit | undefined =>
+      this.unitList.find((u, i) => i >= minIdx && u.info.kind === kind && !!u.mock);
     seed(firstOf('treadmill', 2), 'belt_slip', 8000);
     seed(firstOf('rower'), 'drive_belt_slip', 12000);
     seed(firstOf('elliptical'), 'bearing_knock', 20000);
@@ -302,7 +342,7 @@ export class Fleet {
     // last treadmill on the floor gets the vibration burst
     for (let i = this.unitList.length - 2; i >= 0; i--) {
       if (this.unitList[i].info.kind === 'treadmill') {
-        seed(i, 'vibration_burst', 16000);
+        seed(this.unitList[i], 'vibration_burst', 16000);
         break;
       }
     }

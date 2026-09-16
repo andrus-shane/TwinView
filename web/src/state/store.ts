@@ -4,6 +4,9 @@ import type {
   ChannelStatus,
   FaultId,
   GroupDisplay,
+  LabLayout,
+  LabRealBays,
+  MachineKind,
   PartGroup,
   RigBinding,
   RigConfig,
@@ -25,6 +28,7 @@ export interface ModelInfo {
 /** One entry of the server's model catalog (GET /api/models) */
 export interface ModelEntry {
   model: string;
+  kind: MachineKind;
   glbUrl: string | null;
   manifestUrl: string | null;
   default: boolean;
@@ -49,6 +53,14 @@ export interface AutomationRun {
   exitCode?: number;
   logPath: string;
   result?: unknown;
+}
+
+/** A named floor snapshot on the server (layouts/<name>.json) */
+export interface SavedLayout {
+  name: string;
+  bays: number;
+  units: number;
+  savedAt: number;
 }
 
 /** Selected machine model, persisted across reloads; null = server default (treadmill). */
@@ -76,6 +88,18 @@ interface Store {
   /** Full-screen viewport: all chrome hidden so the 3D view fills the window */
   fullscreen: boolean;
 
+  /** The lab floor: rows of bays, empty or holding a machine (server-persisted) */
+  lab: LabLayout | null;
+  /** Bays wired to real hardware — their kind is fixed by the sensor config */
+  labReal: LabRealBays;
+  /** Floor editor open (lab level only) */
+  labEditing: boolean;
+  /** Bay selected in the floor editor (highlighted on the floor) */
+  editBayId: string | null;
+  savedLayouts: SavedLayout[] | null;
+  /** Last floor-edit error from the server, shown in the editor */
+  labError: string | null;
+
   /** The selected model's rig — what the bind/layers editors write to */
   rig: RigConfig;
   /** Every model's rig, keyed by model id (multi-CAD floor reads these) */
@@ -88,6 +112,16 @@ interface Store {
   connected: boolean;
 
   setFleet(units: UnitInfo[], events: UnitEvent[]): void;
+  setLab(layout: LabLayout, real: LabRealBays): void;
+  setLabEditing(on: boolean): void;
+  selectBay(id: string | null): void;
+  /** Push an edited layout: optimistic locally, then PUT; the server's normalized copy wins. */
+  saveLab(layout: LabLayout): Promise<void>;
+  fetchSavedLayouts(): Promise<void>;
+  saveLayoutAs(name: string): Promise<void>;
+  loadLayout(name: string): Promise<void>;
+  deleteLayout(name: string): Promise<void>;
+  resetLab(): Promise<void>;
   setStates(states: Record<string, TwinState>): void;
   addEvent(e: UnitEvent): void;
   setRig(r: RigConfig): void;
@@ -190,6 +224,13 @@ export const useStore = create<Store>((set, get) => {
   isolateOn: true,
   fullscreen: false,
 
+  lab: null,
+  labReal: {},
+  labEditing: false,
+  editBayId: null,
+  savedLayouts: null,
+  labError: null,
+
   rig: { model: 'NTL99925', bindings: [] },
   rigs: {},
   scenarios: [],
@@ -204,6 +245,79 @@ export const useStore = create<Store>((set, get) => {
       // roster refreshes (auto-flag flips) come with an empty backlog — keep ours
       labEvents: events.length > 0 ? events.slice(-LAB_EVENT_BUFFER) : s.labEvents,
     })),
+
+  setLab: (lab, labReal) =>
+    set((s) => ({
+      lab,
+      labReal,
+      // the edited bay may have been removed by another client
+      editBayId: s.editBayId && lab.rows.some((r) => r.bays.some((b) => b.id === s.editBayId)) ? s.editBayId : null,
+    })),
+  setLabEditing: (labEditing) => set((s) => ({ labEditing, editBayId: labEditing ? s.editBayId : null, labError: null })),
+  selectBay: (editBayId) => set({ editBayId }),
+
+  saveLab: async (layout) => {
+    set({ lab: layout, labError: null });
+    try {
+      const res = await fetch('/api/lab', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(layout),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string; layout?: LabLayout; real?: LabRealBays };
+      if (!res.ok) {
+        set({ labError: body.error ?? `HTTP ${res.status}` });
+        const back = (await api('/lab')) as { layout: LabLayout; real: LabRealBays };
+        set({ lab: back.layout, labReal: back.real });
+        return;
+      }
+      if (body.layout) set({ lab: body.layout, labReal: body.real ?? get().labReal });
+    } catch (e) {
+      set({ labError: String((e as Error).message ?? e) });
+    }
+  },
+  fetchSavedLayouts: async () => {
+    try {
+      set({ savedLayouts: (await api('/lab/layouts')) as SavedLayout[] });
+    } catch {
+      set({ savedLayouts: [] });
+    }
+  },
+  saveLayoutAs: async (name) => {
+    try {
+      const res = (await api(`/lab/layouts/${encodeURIComponent(name)}`, 'PUT', {})) as { layouts: SavedLayout[] };
+      set({ savedLayouts: res.layouts, labError: null });
+    } catch (e) {
+      set({ labError: `save failed: ${(e as Error).message}` });
+    }
+  },
+  loadLayout: async (name) => {
+    try {
+      const res = (await api(`/lab/layouts/${encodeURIComponent(name)}/load`, 'POST', {})) as {
+        layout: LabLayout;
+        real: LabRealBays;
+      };
+      set({ lab: res.layout, labReal: res.real, labError: null, editBayId: null });
+    } catch (e) {
+      set({ labError: `load failed: ${(e as Error).message}` });
+    }
+  },
+  deleteLayout: async (name) => {
+    try {
+      const res = (await api(`/lab/layouts/${encodeURIComponent(name)}`, 'DELETE')) as { layouts: SavedLayout[] };
+      set({ savedLayouts: res.layouts, labError: null });
+    } catch (e) {
+      set({ labError: `delete failed: ${(e as Error).message}` });
+    }
+  },
+  resetLab: async () => {
+    try {
+      const res = (await api('/lab/reset', 'POST', {})) as { layout: LabLayout; real: LabRealBays };
+      set({ lab: res.layout, labReal: res.real, labError: null, editBayId: null });
+    } catch (e) {
+      set({ labError: `reset failed: ${(e as Error).message}` });
+    }
+  },
 
   setStates: (states) => {
     const { focusedUnitId } = get();
@@ -242,6 +356,9 @@ export const useStore = create<Store>((set, get) => {
       bindDialogOpen: false,
       twin: id ? get().states[id] ?? null : null,
       automationRun: null, // run state is unit-scoped; refetched on focus
+      // the floor editor is a lab-level tool
+      labEditing: id ? false : get().labEditing,
+      editBayId: id ? null : get().editBayId,
     });
   },
 
@@ -263,13 +380,14 @@ export const useStore = create<Store>((set, get) => {
   init: async () => {
     // ?model= scopes model-info + rig to the persisted pick; absent = server default
     const q = savedModel() ? `?model=${encodeURIComponent(savedModel()!)}` : '';
-    const [scenarios, models, modelInfo, rig, units] = (await Promise.all([
+    const [scenarios, models, modelInfo, rig, units, labRes] = (await Promise.all([
       api('/scenarios'),
       api('/models'),
       api(`/model-info${q}`),
       api(`/rig${q}`),
       api('/units'),
-    ])) as [ScenarioInfo[], ModelEntry[], ModelInfo, RigConfig, UnitInfo[]];
+      api('/lab'),
+    ])) as [ScenarioInfo[], ModelEntry[], ModelInfo, RigConfig, UnitInfo[], { layout: LabLayout; real: LabRealBays }];
     // every converted model's rig loads too — the floor animates all of them
     const rigs: Record<string, RigConfig> = { [rig.model || modelInfo.model || '']: rig };
     await Promise.all(
@@ -279,7 +397,7 @@ export const useStore = create<Store>((set, get) => {
           rigs[m.model] = await api(`/rig?model=${encodeURIComponent(m.model)}`);
         }),
     );
-    set({ scenarios, models, modelInfo, rig, rigs, units });
+    set({ scenarios, models, modelInfo, rig, rigs, units, lab: labRes.layout, labReal: labRes.real });
   },
 
   saveBinding: async (b) => {

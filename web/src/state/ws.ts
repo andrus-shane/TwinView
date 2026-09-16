@@ -22,6 +22,7 @@ export function connectWs(): void {
     if (msg.type === 'states') store.setStates(msg.states);
     else if (msg.type === 'event') store.addEvent(msg.event);
     else if (msg.type === 'fleet') store.setFleet(msg.units, msg.events);
+    else if (msg.type === 'lab') store.setLab(msg.layout, msg.real);
     else if (msg.type === 'rig') {
       // model-scoped: the store routes it into rigs[model] (and `rig` if selected)
       store.setRig(msg.rig);

@@ -8,6 +8,7 @@ import { EventLog } from './components/EventLog';
 import { FleetPanel } from './components/FleetPanel';
 import { GaugeCard } from './components/GaugeCard';
 import { LabDashboard } from './components/LabDashboard';
+import { LabEditor } from './components/LabEditor';
 import { LayersPanel } from './components/LayersPanel';
 import { PartsPanel } from './components/PartsPanel';
 import { SafetyBanner } from './components/SafetyBanner';
@@ -59,6 +60,10 @@ export function App() {
   const fullscreen = useStore((s) => s.fullscreen);
   const modelInfo = useStore((s) => s.modelInfo);
   const models = useStore((s) => s.models);
+  const labEditing = useStore((s) => s.labEditing);
+  const emptyBays = useStore((s) =>
+    s.lab ? s.lab.rows.reduce((n, r) => n + r.bays.filter((b) => !b.machine).length, 0) : 0,
+  );
   const hoverRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [viewport, setViewport] = useState<string>(initialViewport);
@@ -75,6 +80,12 @@ export function App() {
     viewer.mount(canvasHost.current!);
 
     viewer.onSelectUnit = (id) => useStore.getState().focusUnit(id);
+    // an empty bay (or any bay while editing) opens the floor editor on that bay
+    viewer.onSelectBay = (id) => {
+      const st = useStore.getState();
+      if (!st.labEditing) st.setLabEditing(true);
+      st.selectBay(id);
+    };
     viewer.onSelectPart = (name) => useStore.getState().select(name);
     viewer.onScreenTap = (u, v) => sendTapRef.current(u, v);
     viewer.onScreenSwipe = (u1, v1, u2, v2, durMs) => sendSwipeRef.current(u1, v1, u2, v2, durMs);
@@ -107,9 +118,10 @@ export function App() {
     void store
       .init()
       .then(() => {
-        const { models, rigs, units } = useStore.getState();
+        const { models, rigs, units, lab } = useStore.getState();
         viewer.applyRigs(rigs);
         viewer.setModels(models);
+        viewer.setLab(lab);
         viewer.setFleet(units);
       })
       .catch((e) => console.error('init failed:', e));
@@ -117,6 +129,10 @@ export function App() {
     connectWs();
 
     const unsub = useStore.subscribe((s, prev) => {
+      if (s.lab !== prev.lab) viewer.setLab(s.lab);
+      if (s.labEditing !== prev.labEditing || s.editBayId !== prev.editBayId) {
+        viewer.setEditMode(s.labEditing, s.editBayId);
+      }
       if (s.units !== prev.units) {
         viewer.setFleet(s.units);
         // focused unit vanished from the roster → back to the lab overview
@@ -158,6 +174,7 @@ export function App() {
       if (e.key !== 'Escape') return;
       if (st.bindDialogOpen) st.setBindDialogOpen(false);
       else if (st.fullscreen) st.setFullscreen(false);
+      else if (st.labEditing) st.setLabEditing(false);
       else if (st.selectedNode) st.select(null);
       else if (st.focusedUnitId) st.focusUnit(null);
     };
@@ -332,7 +349,7 @@ export function App() {
   const focusedHasCad = hasCad(focusedUnit?.model);
   const modelBadge =
     level === 'lab'
-      ? `${units.length} units${modelMix ? ` · ${modelMix}` : ` · ${modelName}`}`
+      ? `${units.length} units${emptyBays ? ` · ${emptyBays} empty bay${emptyBays > 1 ? 's' : ''}` : ''}${modelMix ? ` · ${modelMix}` : ` · ${modelName}`}`
       : `${focusedUnit?.label ?? ''} · ${focusedUnit?.serial ?? ''} · ${focusedUnit?.model ?? ''}${focusedHasCad ? ' · CAD' : ''}`;
 
   return (
@@ -369,7 +386,7 @@ export function App() {
 
       <aside className="left">
         {level === 'lab' ? (
-          <FleetPanel />
+          labEditing ? <LabEditor /> : <FleetPanel />
         ) : (
           <>
             <LayersPanel />

@@ -8,11 +8,23 @@ export function FleetPanel() {
   const units = useStore((s) => s.units);
   const states = useStore((s) => s.states);
   const scenarios = useStore((s) => s.scenarios);
-  const { focusUnit } = useStore.getState();
+  const emptyBays = useStore((s) =>
+    s.lab ? s.lab.rows.reduce((n, r) => n + r.bays.filter((b) => !b.machine).length, 0) : 0,
+  );
+  const { focusUnit, setLabEditing } = useStore.getState();
 
   return (
     <div className="parts-panel">
-      <div className="card-title">Units under test ({units.length})</div>
+      <div className="card-title row-between">
+        <span>Units under test ({units.length})</span>
+        <button
+          className="btn tiny"
+          onClick={() => setLabEditing(true)}
+          title="Add/remove bays, resize them, and choose which machine sits in each"
+        >
+          ✎ Edit floor
+        </button>
+      </div>
       <div className="part-list">
         {units.map((u) => {
           const st = states[u.id];
@@ -51,7 +63,13 @@ export function FleetPanel() {
             </div>
           );
         })}
-        {units.length === 0 && <div className="muted">Connecting to the lab…</div>}
+        {units.length === 0 && emptyBays === 0 && <div className="muted">Connecting to the lab…</div>}
+        {emptyBays > 0 && (
+          <div className="muted empty-bays-note" onClick={() => setLabEditing(true)}>
+            {emptyBays} empty bay{emptyBays > 1 ? 's' : ''} — click a dashed outline on the floor (or Edit floor) to
+            place a machine.
+          </div>
+        )}
       </div>
     </div>
   );

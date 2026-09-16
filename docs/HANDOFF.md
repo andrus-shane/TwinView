@@ -70,6 +70,118 @@ hardcoding `/dev/gpiochip0`. Open hardware unknowns: actual rail currents (>30A
 has no verified sensor), motor-armature voltage channel unspecced, relay-board
 ground topology needs a bench continuity check.
 
+## Update 2026-09-16 (later) — editable lab floor (rows of bays, empty bays, runtime placement)
+
+The fixed `fleet.size` grid is gone. The floor is a **layout** — `LabLayout { align, rows[] }`,
+each row `bays[]`, each bay `{ id, label, width, depth, machine: { kind, model } | null }` — in
+`shared/src/index.ts`, persisted to `lab.json` (repo root, rewritten on every edit) and edited
+live from the web. Named snapshots: `layouts/<name>.json`.
+
+- `server/src/lab.ts`: `seedLayout()` reproduces the OLD floor exactly (ceil(sqrt(n)) columns,
+  same kind-spread algorithm the Fleet constructor used, `fleet.models` overrides honored) the
+  first time the server runs without `lab.json`; `normalizeLayout()` validates/clamps a client
+  layout (ids `^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$`, sizes 1.2–6 × 2.2–8 m, ≤200 bays) and coerces
+  real-hardware bays to the kind their sensor config declares; `LabStore` = live file + named saves.
+- `server/src/fleet.ts`: `Fleet` no longer takes size/mix. `applyLayout(layout)` reconciles the
+  roster: new occupied bay → build unit (mock plant, or the real bay's `makeSource()` — sources
+  can't restart after `stop()`, so real bays carry a factory now, `RealBaySpec`), emptied/removed
+  bay or kind change → stop engine + source and drop it, model/label/order change → update
+  `UnitInfo` in place. `UnitInfo.bay` is now the row-major ordinal; the label comes from the bay.
+  Seed-fault timers capture unit ids, not indices.
+- `server/src/main.ts`: `GET/PUT /api/lab`, `POST /api/lab/reset`, `GET /api/lab/layouts`,
+  `PUT /api/lab/layouts/:name`, `POST /api/lab/layouts/:name/load`, `DELETE /api/lab/layouts/:name`.
+  WS sends `{ type: 'lab', layout, real }` on connect and on every change (before the `fleet`
+  refresh). `assignScreens` reruns after each layout commit (cached device list) so new bays
+  pick up spare tablets. `/api/models` entries now carry `kind` (manifest `kind` field, else
+  `kindForModel()` SKU-prefix heuristic in shared).
+- `web/src/scene/viewer.ts`: `setLab(layout)` + `setFleet(units)` both feed `rebuildFloor()`,
+  which rebuilds only when a structural fingerprint (ids, sizes, labels, unit kind/model/serial,
+  align) changes. Every bay is a `Slot` root (`userData.bayId`) holding floor marks (outline —
+  dashed for empty bays, solid for occupied ones shown only in edit mode — and a selection tint)
+  plus, when the unit exists, the machine `Bay` root as a child (`userData.unitId`; `bayFor()`
+  now walks ancestors instead of requiring a direct child of `modelRoot`). Rows stack along z at
+  the depth of their deepest bay; bays sit along x at their own widths; rows center or left-align.
+  Empty slots have a flat invisible hull for picking → `onSelectBay`; in edit mode occupied bays
+  also route clicks to `onSelectBay`. `setEditMode(on, selectedBayId)` drives the marks.
+- `web/src/components/LabEditor.tsx` (left panel when `labEditing`): rows as cards with bay
+  chips, a detail card for the selected bay (label, machine `<select>` grouped by kind — real
+  bays filtered to their kind, footprint presets + exact inputs committing on blur/Enter,
+  move ◀ ▶ wrapping across rows, clear machine, remove bay), toolbar (+ Row, align, Reset,
+  saved-floor Load/✕, Save as). Every edit is optimistic then `PUT /api/lab`; the server's
+  normalized copy replaces it (and a 400 rolls back via `GET /api/lab`).
+- Store (`web/src/state/store.ts`): `lab`, `labReal`, `labEditing`, `editBayId`, `savedLayouts`,
+  `labError` + actions. Focusing a unit closes the editor; Esc closes it at lab level.
+
+Verified in the Browser pane against Shane's already-running dev servers: seed matched the old
+roster exactly (`u01` net treadmill, u02/u04 rowers, u06/u07 ellipticals, u09/u11 pilates, u03
+NTL17915, u05 NTL17624); added a 5th bay to row 1, placed an NTL17624 in it at XL, added a 4th
+row with an empty bay, clicked the empty bay on the floor (both in and out of edit mode), focused
+the new u13 (CAD hot-swap fine), saved/loaded/deleted a named floor, PUT a duplicate id (400),
+PUT `u01` as a rower (coerced back to treadmill), Reset → original 12-bay floor. No console errors.
+
+Gotchas:
+- `lab.json` and `layouts/` are NOT gitignored — the floor is meant to be saveable; commit them
+  if the layout should travel with the repo, or ignore them if it should stay local.
+- `config.json` → `fleet.size/rowers/ellipticals/pilates/models` only matter when `lab.json`
+  is missing (or rejected). Delete `lab.json` (or press Reset) to reseed from config.
+- `UnitInfo.bay` no longer equals the number in the id once bays are reordered — use `id`.
+- The Browser pane's `find` didn't match the "✎ Edit floor" button by text; `read_page` with
+  `filter: interactive` lists it by its `title` attribute.
+
+## Update 2026-09-16 — NTL17624 treadmill conversion (third treadmill model)
+
+`models/NTL17624.glb` (14.0 MB, 136-name manifest, 152 parts, 1.04M tris, creased normals,
+bbox 0.79×1.22×2.06 m — a compact folding treadmill, console top at y≈1.07 m) +
+`models/NTL17624.manifest.json` + `models/rig.NTL17624.json` (belt, deck, both rollers and
+motor bound; `console_screen` left for the UI). Raw GLB 49.8 MB gitignored. Same pipeline and
+the same knobs as NTL17915: `SIMPLIFY_RATIO=0.75 CREASE_DEG=40`. Bay override
+`config.json` → `fleet.models.u05 = "NTL17624"`.
+
+Source: `Downloads\17624\` — 148 loose files (no zip), root literally `~NTL17624.SLDASM`
+(31.8 MB). Copied to `cad/NTL17624/` with the root renamed `NTL17624.SLDASM`; the Downloads
+originals were left in place and never written (no unsuppress → no `Save3`).
+
+Run log (no crashes, 17 min wall): pre-launched `SLDWORKS.exe`, RSS settled at ~790 MB in
+~20 s; `python tools/sw_tessellate_glb.py <abs cad path> <abs models/NTL17624-raw.glb>`
+attached, assembly open 24 s, unsuppress round 1 found NO structural components suppressed
+(19 small parts stay suppressed, 0 lightweight, 0 blacklisted — this export is fully resolved,
+unlike the NTL99925 pack-and-go), tessellation 814 s for 152 parts / 1.38M tris. Expect an
+8-minute quiet stretch after "50 comps" — that's the nine 13–28 MB parts (449675/449704/449706,
+449758/449759, 453553/453556/453558/453559), not a hang. `optimize_glb.mjs` took 2 s.
+
+Rig candidates from `_analyze_glb.mjs` (world AABBs, machine front = −Z like the others):
+- belt `Walking Belt 24887-2` (0.46×0.05×1.40 m) → rig nodeName `Walking_Belt_24887-2`.
+- deck `449766-1` (0.67×0.02×1.29 m, inside the belt loop; wider than the belt).
+- rollers = two `279139-1` instances, 41 mm dia. GLB node order puts the REAR one
+  (z=+0.985, 0.52 m long) first → `279139-1`, and the FRONT drive roller (z=−0.373, 0.54 m,
+  motor end) second → `279139-1_1` (carries the belt_speed tach binding). The suffix is
+  deterministic: `GLTFLoader._loadNodeShallow` calls `createUniqueName` synchronously in
+  child order, so it follows GLB node order. Both show under Instrumented with no
+  "not in model" flag.
+- motor `431727-1` (84 mm × 0.30 m, front-left at z=−0.55) with flywheel `204844-1` and
+  pulley `N03207-1` — the same part numbers as NTL17915's motor candidates.
+- console: top/bottom shells `453557-1`/`453558-1` (0.78 wide, y≈1.07), display pod
+  `453554-1`/`453555-1`/`453640-1` (0.30×0.11×0.11) and `453639-1`. None is a flat panel that
+  `fitPanel` would pose a screen on, so bind `console_screen` by eye in the UI if wanted.
+- uprights `454363-2` ×2 (0.98 m tall), side rails `453597-5`/`453598-4` (1.64 m), foot rails
+  `449758-1`/`449759-1` (1.28 m), motor pan/hood `449675-3`/`449704-1` (0.69×0.46 m).
+- 17 duplicate names in this GLB (`454363-2`, `453612-1`, `150965-1`, …) — the second
+  instance is `<name>_1` in the viewer, so pick the right one when binding.
+
+New gotchas:
+- Bay math for the override: with `size 12 / rowers 2 / ellipticals 2 / pilates 2` the specials
+  land on u02, u04, u06, u07, u09, u11, so the mock treadmill bays are u01 (real when net/serial
+  is up), u03 (NTL17915), u05 (NTL17624), u08, u10, u12. `/api/units` confirms kind + model.
+- The dev server was Shane's own `tsx watch src/main.ts` from a terminal. Rather than starting a
+  second copy on 8720, touching `server/src/main.ts` (mtime only, no content change) makes tsx
+  restart it and re-read `config.json` — no need to kill the terminal process.
+- First visit to the bay seeded the rig's `groups` (the app PUTs them back through `/api/rig`),
+  which is why `rig.NTL17624.json` grew groups it was not written with. Expected; NTL17915's
+  rig got its groups the same way.
+- Scratch gltf-transform scripts outside the repo can't resolve `@gltf-transform/core`;
+  `node --input-type=module - <args> < script.mjs` from the repo root works because bare
+  specifiers resolve against the cwd for stdin modules.
+
 ## Update 2026-09-14 — NTL17915 treadmill conversion (second treadmill model)
 
 `models/NTL17915.glb` (21.7 MB, 172-name manifest, 210 parts, 1.68M tris, WITH creased normals,

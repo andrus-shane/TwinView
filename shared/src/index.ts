@@ -265,10 +265,87 @@ export interface RigConfig {
   groups?: PartGroup[];
 }
 
+// --- Lab floor layout: rows of bays (slots), each sized independently and
+// either empty or holding one machine. Persisted server-side (lab.json) and
+// edited live from the web; the fleet roster is derived from the occupied bays.
+
+export const MACHINE_KINDS: MachineKind[] = ['treadmill', 'rower', 'elliptical', 'pilates'];
+
+export const KIND_LABELS: Record<MachineKind, string> = {
+  treadmill: 'Treadmill',
+  rower: 'Rower',
+  elliptical: 'Elliptical',
+  pilates: 'Pilates reformer',
+};
+
+/** Default CAD model per kind — what a bay gets when only a kind is chosen. */
+export const DEFAULT_MODEL_BY_KIND: Record<MachineKind, string> = {
+  treadmill: 'NTL99925',
+  rower: 'FMRW0826-1D30',
+  elliptical: 'NTEL71426',
+  pilates: 'NTPL99926-6FW0',
+};
+
+/**
+ * Machine kind for a model id. Known ids first, then the iFit SKU prefix
+ * (NTL/PFTL/… treadmills, NTEL ellipticals, FMRW rowers, NTPL reformers);
+ * anything else is a treadmill.
+ */
+export function kindForModel(model: string): MachineKind {
+  for (const [kind, m] of Object.entries(DEFAULT_MODEL_BY_KIND) as [MachineKind, string][]) {
+    if (m === model) return kind;
+  }
+  const up = model.toUpperCase();
+  if (/^(NTEL|PFEL|FMEL|[A-Z]*EL\d)/.test(up)) return 'elliptical';
+  if (/^(FMRW|NTRW|PFRW|[A-Z]*RW\d)/.test(up)) return 'rower';
+  if (/^(NTPL|PFPL|[A-Z]*PL\d)/.test(up)) return 'pilates';
+  return 'treadmill';
+}
+
+/** Footprint of a standard bay (m): the proxy machine is ~1 × 2.6 m plus walkway. */
+export const BAY_SIZE_DEFAULT = { width: 2.0, depth: 3.4 };
+export const BAY_SIZE_MIN = { width: 1.2, depth: 2.2 };
+export const BAY_SIZE_MAX = { width: 6, depth: 8 };
+
+export interface LabMachine {
+  kind: MachineKind;
+  /** CAD model id from models/ (falls back to the kind's proxy when no GLB exists) */
+  model: string;
+}
+
+/** One floor slot. `id` doubles as the unit id while the bay is occupied
+ * (so hardware configs keyed "u01" keep pointing at the same slot). */
+export interface LabBay {
+  id: string;
+  label: string;
+  /** Footprint along the row (x), metres */
+  width: number;
+  /** Footprint front-to-back (z), metres */
+  depth: number;
+  /** null = empty bay */
+  machine: LabMachine | null;
+}
+
+export interface LabRow {
+  id: string;
+  label?: string;
+  bays: LabBay[];
+}
+
+export interface LabLayout {
+  version: 1;
+  /** How rows of unequal width line up on the floor */
+  align: 'center' | 'left';
+  rows: LabRow[];
+}
+
+/** Real-hardware slots: bay id → the kind and source its sensor config declares. */
+export type LabRealBays = Record<string, { kind: MachineKind; source: 'serial' | 'net' }>;
+
 /** One unit under test on the lab floor */
 export interface UnitInfo {
   id: string;
-  /** 1-based bay number; drives floor placement */
+  /** 1-based position in floor order (row-major); labels come from the bay */
   bay: number;
   label: string;
   serial: string;
@@ -295,7 +372,8 @@ export type ServerMessage =
   | { type: 'fleet'; units: UnitInfo[]; events: UnitEvent[] }
   | { type: 'states'; states: Record<string, TwinState> }
   | { type: 'event'; event: UnitEvent }
-  | { type: 'rig'; rig: RigConfig };
+  | { type: 'rig'; rig: RigConfig }
+  | { type: 'lab'; layout: LabLayout; real: LabRealBays };
 
 /** Scenario descriptor for the mock source */
 export interface ScenarioInfo {

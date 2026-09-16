@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import type { ChannelStatus, MachineKind, RigConfig, TwinState, UnitInfo } from '@twinview/shared';
+import type { ChannelStatus, LabBay, LabLayout, MachineKind, RigConfig, TwinState, UnitInfo } from '@twinview/shared';
 import { FALLBACKS_BY_KIND } from './fallback';
 import { buildCadLod, type CadLod } from './lod';
 import { applyCadMaterials, seedGroups, type PartKind } from './materials';
@@ -23,9 +23,14 @@ const XRAY_MAT = new THREE.MeshBasicMaterial({
   side: THREE.DoubleSide,
 });
 
-/** Bay footprint on the floor: proxy machine is ~1m × 2.6m, front toward -Z */
+/** Fallback footprint for a row with no bays (m); real sizes come from the layout */
 const BAY_X = 2.0;
 const BAY_Z = 3.4;
+
+/** Floor markings: bay outlines (edit mode / empty bays) and the edit selection tint */
+const SLOT_LINE = 0x64748b;
+const SLOT_LINE_EMPTY = 0x7c8798;
+const SLOT_SELECT = 0x4ea1ff;
 
 const HALO_COLORS: Record<ChannelStatus | 'idle', number> = {
   idle: 0x64748b,
@@ -75,7 +80,7 @@ function issueCount(state: TwinState | null): number {
   return n;
 }
 
-function bayLabelTexture(unit: UnitInfo): THREE.CanvasTexture {
+function bayLabelTexture(title: string, sub: string, dim = false): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 512;
   c.height = 160;
@@ -83,15 +88,40 @@ function bayLabelTexture(unit: UnitInfo): THREE.CanvasTexture {
   g.clearRect(0, 0, c.width, c.height);
   g.textAlign = 'center';
   g.font = '700 72px system-ui';
-  g.fillStyle = 'rgba(148, 163, 184, 0.85)';
-  g.fillText(unit.label.toUpperCase(), 256, 78);
+  g.fillStyle = dim ? 'rgba(148, 163, 184, 0.5)' : 'rgba(148, 163, 184, 0.85)';
+  g.fillText(title.toUpperCase(), 256, 78);
   g.font = '500 44px system-ui';
-  g.fillStyle = 'rgba(148, 163, 184, 0.55)';
-  g.fillText(unit.serial, 256, 138);
+  g.fillStyle = dim ? 'rgba(148, 163, 184, 0.4)' : 'rgba(148, 163, 184, 0.55)';
+  g.fillText(sub, 256, 138);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
   return tex;
+}
+
+/** Floor marking for one bay footprint: outline (+ tint while selected in the editor). */
+function buildSlotMarks(bay: LabBay, empty: boolean): { outline: THREE.LineSegments; fill: THREE.Mesh } {
+  const w = Math.max(0.3, bay.width - 0.08);
+  const d = Math.max(0.3, bay.depth - 0.08);
+  const plane = new THREE.PlaneGeometry(w, d).rotateX(-Math.PI / 2);
+  const edges = new THREE.EdgesGeometry(plane);
+  const mat = empty
+    ? new THREE.LineDashedMaterial({ color: SLOT_LINE_EMPTY, dashSize: 0.18, gapSize: 0.12, transparent: true, opacity: 0.7 })
+    : new THREE.LineBasicMaterial({ color: SLOT_LINE, transparent: true, opacity: 0.45 });
+  const outline = new THREE.LineSegments(edges, mat);
+  outline.computeLineDistances();
+  outline.position.y = 0.003;
+  outline.name = '__slot_outline__';
+  outline.raycast = () => undefined;
+  const fill = new THREE.Mesh(
+    plane,
+    new THREE.MeshBasicMaterial({ color: SLOT_SELECT, transparent: true, opacity: 0.14, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  fill.position.y = 0.002;
+  fill.name = '__slot_fill__';
+  fill.raycast = () => undefined;
+  fill.visible = false;
+  return { outline, fill };
 }
 
 /** One converted CAD model (GLB) and everything derived from it. The full
@@ -107,6 +137,19 @@ interface CadEntry {
   names: string[];
   load: Promise<boolean> | null;
   lod: CadLod | null;
+}
+
+/** One floor slot from the lab layout — occupied (holds a Bay) or empty. */
+interface Slot {
+  bay: LabBay;
+  root: THREE.Group;
+  outline: THREE.LineSegments;
+  fill: THREE.Mesh;
+  /** Flat invisible pick target — only empty slots carry one (machines have their hull) */
+  hull: THREE.Mesh | null;
+  labelTex: THREE.CanvasTexture;
+  machine: Bay | null;
+  hovered: boolean;
 }
 
 interface Bay {
@@ -150,6 +193,8 @@ interface CamAnim {
  */
 export class Viewer {
   onSelectUnit: (unitId: string) => void = () => {};
+  /** A bay was clicked as a floor slot: an empty bay, or any bay while the floor editor is open. */
+  onSelectBay: (bayId: string) => void = () => {};
   onSelectPart: (name: string | null) => void = () => {};
   /** Tap-through: a click landed on the live console screen at this normalized
    * position (origin top-left, matching device screen space). */
@@ -189,6 +234,14 @@ export class Viewer {
 
   private bays = new Map<string, Bay>();
   private bayList: Bay[] = [];
+  private slots = new Map<string, Slot>();
+  private slotList: Slot[] = [];
+  private layout: LabLayout | null = null;
+  private unitList: UnitInfo[] = [];
+  /** Structural fingerprint of the built floor; a change rebuilds it */
+  private floorKey = '';
+  private editMode = false;
+  private editSelected: string | null = null;
   private floorExtent = 8;
   private focusedId: string | null = null;
   private selectedName: string | null = null;
@@ -296,6 +349,7 @@ export class Viewer {
     });
     el.addEventListener('pointerleave', () => {
       for (const b of this.bayList) b.hovered = false;
+      for (const sl of this.slotList) sl.hovered = false;
       el.style.cursor = 'default';
       this.onHover(null);
     });
@@ -424,17 +478,54 @@ export class Viewer {
     if (visible) bay.animator.setRig(this.bayRig(bay));
   }
 
-  /** Build (or refresh) the lab floor. Rebuilds only when the roster actually changes. */
+  /** Roster update. Rebuilds the floor only when its structure changed; otherwise refreshes unit info in place. */
   setFleet(units: UnitInfo[]): void {
-    const ids = units.map((u) => u.id).join(',');
-    const current = this.bayList.map((b) => b.unit.id).join(',');
-    if (ids === current) {
-      for (const u of units) {
+    this.unitList = units;
+    this.rebuildFloor();
+  }
+
+  /** The lab layout (rows of bays). Bays without a unit yet render as empty slots. */
+  setLab(layout: LabLayout | null): void {
+    this.layout = layout;
+    this.rebuildFloor();
+  }
+
+  /** Floor editor: show every bay's footprint and tint the bay being edited. */
+  setEditMode(on: boolean, selectedBayId: string | null): void {
+    this.editMode = on;
+    this.editSelected = on ? selectedBayId : null;
+    for (const slot of this.slotList) {
+      slot.outline.visible = on || !slot.machine;
+      slot.fill.visible = on && slot.bay.id === this.editSelected;
+    }
+  }
+
+  /** What the floor is built from: layout structure + which slots have a live unit (and of what). */
+  private computeFloorKey(): string {
+    if (!this.layout) return '';
+    const byId = new Map(this.unitList.map((u) => [u.id, u]));
+    const rows = this.layout.rows.map((r) =>
+      r.bays
+        .map((b) => {
+          const u = byId.get(b.id);
+          return `${b.id}:${b.width}x${b.depth}:${b.label}:${u ? `${u.kind}/${u.model}/${u.serial}` : b.machine ? 'pending' : '-'}`;
+        })
+        .join('|'),
+    );
+    return `${this.layout.align};${rows.join('#')}`;
+  }
+
+  private rebuildFloor(): void {
+    const key = this.computeFloorKey();
+    if (key === this.floorKey) {
+      for (const u of this.unitList) {
         const bay = this.bays.get(u.id);
         if (bay) bay.unit = u;
       }
       return;
     }
+    this.floorKey = key;
+    const layout = this.layout;
 
     // Release the focused unit before tearing its bay down — the CAD twin,
     // console wiring, and hull raycast state must not ride a removed root.
@@ -443,116 +534,52 @@ export class Viewer {
 
     for (const bay of this.bayList) {
       bay.animator.setRig(EMPTY_RIG);
-      this.modelRoot.remove(bay.root);
       bay.badgeTex.dispose();
       bay.hull.geometry.dispose();
       (bay.hull.material as THREE.Material).dispose();
     }
+    for (const slot of this.slotList) {
+      this.modelRoot.remove(slot.root);
+      slot.outline.geometry.dispose();
+      (slot.outline.material as THREE.Material).dispose();
+      slot.fill.geometry.dispose();
+      (slot.fill.material as THREE.Material).dispose();
+      slot.labelTex.dispose();
+      if (slot.hull) {
+        slot.hull.geometry.dispose();
+        (slot.hull.material as THREE.Material).dispose();
+      }
+    }
     this.bays.clear();
     this.bayList = [];
+    this.slots.clear();
+    this.slotList = [];
+    if (!layout) return;
 
-    const n = units.length;
-    const cols = Math.ceil(Math.sqrt(n));
-    const rows = Math.ceil(n / cols);
-
-    units.forEach((unit, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const x = (col - (cols - 1) / 2) * BAY_X;
-      const z = (row - (rows - 1) / 2) * BAY_Z;
-
-      const root = new THREE.Group();
-      root.name = `__bay_${unit.id}__`;
-      root.userData.unitId = unit.id;
-      root.position.set(x, 0, z);
-
-      const proxy = FALLBACKS_BY_KIND[unit.kind].build();
-      proxy.traverse((o) => {
-        o.castShadow = true;
-        o.receiveShadow = true;
-      });
-      // machine bounds while the proxy is still unparented (local space)
-      const proxyBox = new THREE.Box3().setFromObject(proxy);
-      root.add(proxy);
-
-      // invisible box around the machine: unit picking raycasts this instead
-      // of the dense meshes (a merged LOD has no per-part culling to lean on)
-      const hullMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
-      hullMat.colorWrite = false;
-      const hull = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hullMat);
-      hull.name = '__hull__';
-      this.sizeHull(hull, proxyBox);
-      root.add(hull);
-
-      // status halo: ellipse painted on the floor around the machine
-      const haloMat = new THREE.MeshBasicMaterial({
-        color: HALO_COLORS.idle,
-        transparent: true,
-        opacity: 0.28,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      });
-      const halo = new THREE.Mesh(new THREE.RingGeometry(0.93, 1.05, 56).rotateX(-Math.PI / 2), haloMat);
-      halo.scale.set(0.8, 1, 1.55);
-      // center the ellipse under the machine: mass sits differently per kind
-      halo.position.set(0, 0.006, HALO_Z[unit.kind]);
-      halo.name = '__halo__';
-      halo.raycast = () => undefined;
-      root.add(halo);
-
-      // painted bay number in front of the machine
-      const labelTex = bayLabelTexture(unit);
-      const label = new THREE.Mesh(
-        new THREE.PlaneGeometry(1.15, 0.36).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ map: labelTex, transparent: true, depthWrite: false }),
-      );
-      label.position.set(0, 0.004, 1.35);
-      label.name = '__bay_label__';
-      label.raycast = () => undefined;
-      root.add(label);
-
-      // floating detection badge above the console; hidden while healthy
-      const badgeCanvas = document.createElement('canvas');
-      badgeCanvas.width = 192;
-      badgeCanvas.height = 96;
-      const badgeTex = new THREE.CanvasTexture(badgeCanvas);
-      badgeTex.colorSpace = THREE.SRGBColorSpace;
-      const badge = new THREE.Sprite(new THREE.SpriteMaterial({ map: badgeTex, depthTest: false }));
-      badge.scale.set(0.6, 0.3, 1);
-      badge.position.set(...BADGE_POS[unit.kind]);
-      badge.visible = false;
-      badge.renderOrder = 998;
-      badge.raycast = () => undefined;
-      root.add(badge);
-
-      const animator = new RigAnimator(root);
-      animator.setRig(FALLBACKS_BY_KIND[unit.kind].rig);
-
-      const bay: Bay = {
-        unit,
-        root,
-        proxy,
-        lod: null,
-        hull,
-        animator,
-        halo,
-        haloMat,
-        badge,
-        badgeCanvas,
-        badgeTex,
-        badgeKey: '',
-        state: null,
-        hovered: false,
-        pulsePhase: (i * Math.PI) / 3,
-      };
-      this.modelRoot.add(root);
-      this.bays.set(unit.id, bay);
-      this.bayList.push(bay);
-      this.applyLodToBay(bay);
+    // Rows stack front-to-back along z (first row farthest from the default
+    // camera); each row is as deep as its deepest bay. Bays sit side by side
+    // along x at their own widths; rows of unequal width center (or left-align).
+    const byId = new Map(this.unitList.map((u) => [u.id, u]));
+    const rowDepth = layout.rows.map((r) => (r.bays.length ? Math.max(...r.bays.map((b) => b.depth)) : BAY_Z));
+    const rowWidth = layout.rows.map((r) => (r.bays.length ? r.bays.reduce((n, b) => n + b.width, 0) : BAY_X));
+    const totalDepth = rowDepth.reduce((n, d) => n + d, 0);
+    const maxWidth = Math.max(BAY_X, ...rowWidth);
+    let z = -totalDepth / 2;
+    let i = 0;
+    layout.rows.forEach((row, r) => {
+      const zc = z + rowDepth[r] / 2;
+      let x = layout.align === 'left' ? -maxWidth / 2 : -rowWidth[r] / 2;
+      for (const bay of row.bays) {
+        const xc = x + bay.width / 2;
+        x += bay.width;
+        const unit = byId.get(bay.id) ?? null;
+        this.buildSlot(bay, unit, xc, zc, i++);
+      }
+      z += rowDepth[r];
     });
 
     // size the floor, grid, and shadow frustum to the fleet
-    this.floorExtent = Math.max(8, (cols * BAY_X) / 2 + 3, (rows * BAY_Z) / 2 + 3);
+    this.floorExtent = Math.max(8, maxWidth / 2 + 3, totalDepth / 2 + 3);
     this.ground.geometry.dispose();
     this.ground.geometry = new THREE.CircleGeometry(this.floorExtent + 3, 64).rotateX(-Math.PI / 2);
     const sc = this.dirLight.shadow.camera;
@@ -562,10 +589,132 @@ export class Viewer {
     sc.bottom = -this.floorExtent - 2;
     sc.updateProjectionMatrix();
     this.applyBackground();
+    this.setEditMode(this.editMode, this.editSelected);
 
     // resume the drill-down if the focused unit survived the roster change
     if (prevFocus && this.bays.has(prevFocus)) this.focusUnit(prevFocus, false);
     else this.frameLab(false);
+  }
+
+  /** One floor slot at (x, z): footprint marks + label, and the machine when the bay has a live unit. */
+  private buildSlot(bay: LabBay, unit: UnitInfo | null, x: number, z: number, index: number): void {
+    const root = new THREE.Group();
+    root.name = `__slot_${bay.id}__`;
+    root.userData.bayId = bay.id;
+    root.position.set(x, 0, z);
+    const { outline, fill } = buildSlotMarks(bay, !unit);
+    root.add(outline, fill);
+
+    // painted bay label at the front edge of the slot
+    const labelTex = unit
+      ? bayLabelTexture(bay.label, unit.serial)
+      : bayLabelTexture(bay.label, bay.machine ? 'loading…' : 'empty', true);
+    const label = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.15, 0.36).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ map: labelTex, transparent: true, depthWrite: false }),
+    );
+    label.position.set(0, 0.004, bay.depth / 2 - 0.35);
+    label.name = '__bay_label__';
+    label.raycast = () => undefined;
+    root.add(label);
+
+    let hull: THREE.Mesh | null = null;
+    if (!unit) {
+      // empty slot: a flat invisible slab is the pick target
+      const hullMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+      hullMat.colorWrite = false;
+      hull = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.3, bay.width - 0.1), 0.06, Math.max(0.3, bay.depth - 0.1)), hullMat);
+      hull.name = '__slot_hull__';
+      hull.position.y = 0.03;
+      root.add(hull);
+    }
+
+    const slot: Slot = { bay, root, outline, fill, hull, labelTex, machine: null, hovered: false };
+    this.modelRoot.add(root);
+    this.slots.set(bay.id, slot);
+    this.slotList.push(slot);
+    if (unit) slot.machine = this.buildMachine(unit, root, index);
+  }
+
+  /** The live machine for an occupied slot: proxy/LOD, pick hull, halo, badge, animator. */
+  private buildMachine(unit: UnitInfo, slotRoot: THREE.Group, index: number): Bay {
+    const root = new THREE.Group();
+    root.name = `__bay_${unit.id}__`;
+    root.userData.unitId = unit.id;
+
+    const proxy = FALLBACKS_BY_KIND[unit.kind].build();
+    proxy.traverse((o) => {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    });
+    // machine bounds while the proxy is still unparented (local space)
+    const proxyBox = new THREE.Box3().setFromObject(proxy);
+    root.add(proxy);
+
+    // invisible box around the machine: unit picking raycasts this instead
+    // of the dense meshes (a merged LOD has no per-part culling to lean on)
+    const hullMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+    hullMat.colorWrite = false;
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hullMat);
+    hull.name = '__hull__';
+    this.sizeHull(hull, proxyBox);
+    root.add(hull);
+
+    // status halo: ellipse painted on the floor around the machine
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: HALO_COLORS.idle,
+      transparent: true,
+      opacity: 0.28,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const halo = new THREE.Mesh(new THREE.RingGeometry(0.93, 1.05, 56).rotateX(-Math.PI / 2), haloMat);
+    halo.scale.set(0.8, 1, 1.55);
+    // center the ellipse under the machine: mass sits differently per kind
+    halo.position.set(0, 0.006, HALO_Z[unit.kind]);
+    halo.name = '__halo__';
+    halo.raycast = () => undefined;
+    root.add(halo);
+
+    // floating detection badge above the console; hidden while healthy
+    const badgeCanvas = document.createElement('canvas');
+    badgeCanvas.width = 192;
+    badgeCanvas.height = 96;
+    const badgeTex = new THREE.CanvasTexture(badgeCanvas);
+    badgeTex.colorSpace = THREE.SRGBColorSpace;
+    const badge = new THREE.Sprite(new THREE.SpriteMaterial({ map: badgeTex, depthTest: false }));
+    badge.scale.set(0.6, 0.3, 1);
+    badge.position.set(...BADGE_POS[unit.kind]);
+    badge.visible = false;
+    badge.renderOrder = 998;
+    badge.raycast = () => undefined;
+    root.add(badge);
+
+    const animator = new RigAnimator(root);
+    animator.setRig(FALLBACKS_BY_KIND[unit.kind].rig);
+
+    const bay: Bay = {
+      unit,
+      root,
+      proxy,
+      lod: null,
+      hull,
+      animator,
+      halo,
+      haloMat,
+      badge,
+      badgeCanvas,
+      badgeTex,
+      badgeKey: '',
+      state: null,
+      hovered: false,
+      pulsePhase: (index * Math.PI) / 3,
+    };
+    slotRoot.add(root);
+    this.bays.set(unit.id, bay);
+    this.bayList.push(bay);
+    this.applyLodToBay(bay);
+    return bay;
   }
 
   applyStates(states: Record<string, TwinState>): void {
@@ -1016,10 +1165,18 @@ export class Viewer {
 
   private bayFor(obj: THREE.Object3D): Bay | null {
     let cur: THREE.Object3D | null = obj;
-    while (cur) {
-      if (cur.parent === this.modelRoot && cur.userData.unitId) {
-        return this.bays.get(cur.userData.unitId) ?? null;
-      }
+    while (cur && cur !== this.modelRoot) {
+      if (cur.userData.unitId) return this.bays.get(cur.userData.unitId) ?? null;
+      cur = cur.parent;
+    }
+    return null;
+  }
+
+  /** The floor slot an object belongs to (slot roots are direct children of modelRoot). */
+  private slotFor(obj: THREE.Object3D): Slot | null {
+    let cur: THREE.Object3D | null = obj;
+    while (cur && cur !== this.modelRoot) {
+      if (cur.userData.bayId) return this.slots.get(cur.userData.bayId) ?? null;
       cur = cur.parent;
     }
     return null;
@@ -1082,10 +1239,23 @@ export class Viewer {
     const hitI = this.hitAt(e);
     const hit = hitI?.object ?? null;
     const bay = hit ? this.bayFor(hit) : null;
+    const slot = hit ? this.slotFor(hit) : null;
 
     for (const b of this.bayList) b.hovered = false;
+    for (const sl of this.slotList) sl.hovered = false;
 
     if (!bay) {
+      if (slot && !this.focusedId) {
+        // empty bay: a floor slot waiting for a machine
+        if (isClick) {
+          this.onSelectBay(slot.bay.id);
+        } else {
+          slot.hovered = true;
+          this.renderer.domElement.style.cursor = 'pointer';
+          this.onHover(`${slot.bay.label} — empty bay · ${slot.bay.width} × ${slot.bay.depth} m (click to place a machine)`);
+        }
+        return;
+      }
       this.renderer.domElement.style.cursor = 'default';
       if (isClick && this.focusedId) this.onSelectPart(null);
       if (!isClick) this.onHover(null);
@@ -1094,9 +1264,11 @@ export class Viewer {
 
     const isFocusedBay = this.focusedId === bay.unit.id;
     if (!isFocusedBay) {
-      // lab level (or a neighboring unit while drilled in): whole-unit target
+      // lab level (or a neighboring unit while drilled in): whole-unit target —
+      // or the slot itself while the floor editor is open
       if (isClick) {
-        this.onSelectUnit(bay.unit.id);
+        if (this.editMode && !this.focusedId) this.onSelectBay(bay.unit.id);
+        else this.onSelectUnit(bay.unit.id);
       } else {
         bay.hovered = true;
         this.renderer.domElement.style.cursor = 'pointer';
@@ -1130,6 +1302,12 @@ export class Viewer {
   // --- Per-frame ---
 
   private updateBayIndicators(): void {
+    for (const slot of this.slotList) {
+      if (slot.machine) continue;
+      const m = slot.outline.material as THREE.LineDashedMaterial;
+      m.opacity = slot.hovered ? 1 : 0.7;
+      m.color.setHex(slot.hovered ? SLOT_SELECT : SLOT_LINE_EMPTY);
+    }
     for (const bay of this.bayList) {
       const st = bay.state;
       const status = worstStatus(st);

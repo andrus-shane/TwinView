@@ -23,8 +23,35 @@ Open http://localhost:5173. The lab floor boots with 12 units — 6 NTL99925 tre
 rowers, 2 NTEL71426 ellipticals, and 2 NTPL99926 pilates reformers spread through the bays — on
 staggered auto-cycling scenarios and five seeded faults (belt slip, vibration burst, rower
 drive-belt slip, elliptical bearing knock, reformer carriage drag) so detections start flowing
-within ~25 s. Fleet size / mix / autorun / fault seeding are configurable via `config.json` →
-`"fleet": { "size": 12, "rowers": 2, "ellipticals": 2, "pilates": 2, "autorun": true, "seedFaults": true }`.
+within ~25 s. Autorun / fault seeding are configurable via `config.json` →
+`"fleet": { "autorun": true, "seedFaults": true }`; the floor itself is edited live (below).
+
+## Lab floor layout (edit at run time)
+
+The floor is **rows of bays**, each bay sized independently and either empty or holding one
+machine. It lives in `lab.json` next to `config.json` and is rewritten on every edit, so a
+restart comes back to the same floor. The first boot with no `lab.json` seeds the classic grid
+from `config.json` → `"fleet": { "size", "rowers", "ellipticals", "pilates", "models" }` (those
+keys are only a seed after that).
+
+**Edit floor** (left panel at lab level, or click any dashed empty bay) opens the editor:
+
+- **Rows** — add / remove / reorder; rows can hold different numbers of bays and line up
+  centered or left-aligned.
+- **Bays** — add to a row, remove, move left/right (wrapping into the neighboring row), rename,
+  pick a footprint (Compact / Standard / Wide / XL presets or exact width × depth in metres).
+- **Machine** — choose any model from the catalog (grouped by kind) or leave the bay empty.
+  Placing a machine spins up its plant + twin engine on the spot; clearing it tears them down.
+  Bays wired to real hardware (`network_sensors.json` / serial config, keyed by bay id) are
+  marked **HW** and only accept models of the kind their sensor config declares.
+- **Save as / Load / Reset** — named snapshots go to `layouts/<name>.json`; Reset returns to the
+  `config.json` grid.
+
+A bay's id (`u01`, `u02`, …) doubles as its unit id while occupied, so tablet pins
+(`fleet.screens`), channel subsets (`fleet.channels`) and hardware configs keep pointing at the
+same slot. API: `GET/PUT /api/lab`, `POST /api/lab/reset`, `GET /api/lab/layouts`,
+`PUT /api/lab/layouts/:name`, `POST /api/lab/layouts/:name/load`, `DELETE /api/lab/layouts/:name`;
+the WS pushes `{ type: 'lab' }` on every change.
 
 ## Drill-down
 
@@ -135,12 +162,15 @@ model.
 ## Layout
 
 - `shared/` — TS types shared by server and web (fleet + twin state wire contract, rig config)
-- `server/` — Fastify + WS backend: `fleet.ts` (N units: per-unit plant + engine, autorun,
-  seeded faults), `twin.ts` (reference model + deviation engine), `sources/mock.ts` (simulated
-  machine + fault injection), `scenarios.ts` (test profiles). WS pushes a 10 Hz batched state for
-  all units plus individual events; REST is unit-scoped under `/api/units/:id/…`
-- `web/` — Vite + React + three.js frontend: `scene/viewer.ts` (lab floor: bay grid, halos,
-  badges, camera flights, CAD hot-swap, level-aware picking via invisible bay hulls),
+- `server/` — Fastify + WS backend: `lab.ts` (floor layout: seed from config, validate,
+  persist `lab.json` + named `layouts/`), `fleet.ts` (roster reconciled from the layout's
+  occupied bays: per-unit plant + engine, autorun, seeded faults), `twin.ts` (reference model +
+  deviation engine), `sources/mock.ts` (simulated machine + fault injection), `scenarios.ts`
+  (test profiles). WS pushes a 10 Hz batched state for all units plus individual events; REST is
+  unit-scoped under `/api/units/:id/…`, floor-scoped under `/api/lab`
+- `web/` — Vite + React + three.js frontend: `scene/viewer.ts` (lab floor: layout-driven bay
+  slots with per-bay footprints, empty-bay outlines, halos, badges, camera flights, CAD hot-swap,
+  level-aware picking via invisible bay hulls), `components/LabEditor.tsx` (floor editor),
   `scene/lod.ts` (fleet LOD: merge + meshopt-simplify the CAD assembly, shared across bays),
   `scene/rig.ts` (per-unit twin behaviors: deck tilt, belt flow, status tint, ghost),
   `components/` (lab dashboard, fleet panel, component inspector, unit dashboard)

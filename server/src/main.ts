@@ -6,14 +6,19 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
   FAULT_IDS,
+  MACHINE_KINDS,
+  kindForModel,
   type ChannelId,
   type FaultId,
+  type LabLayout,
+  type LabRealBays,
   type MachineKind,
   type RigConfig,
   type ServerMessage,
 } from '@twinview/shared';
 import { AutomationBridge } from './automation.js';
-import { Fleet } from './fleet.js';
+import { Fleet, type RealBaySpec } from './fleet.js';
+import { LabStore, normalizeLayout, seedLayout } from './lab.js';
 import { NetSource, loadNetConfig } from './sources/net.js';
 import { SerialSource, loadSerialConfig } from './sources/serial.js';
 import type { TelemetrySource } from './sources/types.js';
@@ -34,6 +39,9 @@ const ROOT = resolve(__dirname, '..', '..');
 const MODELS_DIR = join(ROOT, 'models');
 const RIG_PATH = join(MODELS_DIR, 'rig.json');
 const CONFIG_PATH = join(ROOT, 'config.json');
+/** The live lab floor (rows of bays); rewritten on every edit. Named snapshots go in layouts/. */
+const LAB_PATH = join(ROOT, 'lab.json');
+const LAYOUTS_DIR = join(ROOT, 'layouts');
 
 const STATES_TICK_MS = 100; // 10 Hz fleet state batch
 const EVENT_BACKLOG = 120; // merged events sent to new WS clients
@@ -45,6 +53,11 @@ interface AppConfig {
   netConfigPath?: string;
   port: number;
   scrcpyDir?: string;
+  /**
+   * Seed for the lab floor the FIRST time the server runs (no lab.json yet):
+   * size/rowers/ellipticals/pilates/models describe the classic grid. After
+   * that the floor lives in lab.json and is edited from the web UI.
+   */
   fleet?: {
     size?: number;
     rowers?: number;
@@ -76,18 +89,17 @@ const config: AppConfig = existsSync(CONFIG_PATH)
 
 mkdirSync(MODELS_DIR, { recursive: true });
 
-// --- The lab fleet: N mock units; serial/net configs make specific bays real.
-// Legacy serial config → bay 1 (u01) treadmill on a COM port; the net config
-// declares real units by id, each aggregating one or more Pi TCP endpoints. ---
-const realSources = new Map<
-  string,
-  { kind: MachineKind; source: TelemetrySource; channels: ChannelId[] }
->();
+// --- Real-hardware bays: serial/net configs make specific bay ids real.
+// Legacy serial config → bay u01 treadmill on a COM port; the net config
+// declares real units by id, each aggregating one or more Pi TCP endpoints.
+// Sources are built per placement (they can't restart after stop()). ---
+const realBays = new Map<string, RealBaySpec>();
 if (config.source === 'serial' && config.serialConfigPath) {
   const serialCfg = loadSerialConfig(resolve(ROOT, config.serialConfigPath));
-  realSources.set('u01', {
+  realBays.set('u01', {
     kind: 'treadmill',
-    source: new SerialSource(serialCfg),
+    sourceKind: 'serial',
+    makeSource: (): TelemetrySource => new SerialSource(serialCfg),
     // non-null entries are the instrumented channels; the twin tracks only those
     channels: Object.entries(serialCfg)
       .filter(([, spec]) => spec)
@@ -97,20 +109,24 @@ if (config.source === 'serial' && config.serialConfigPath) {
 if (config.netConfigPath) {
   const netCfg = loadNetConfig(resolve(ROOT, config.netConfigPath));
   for (const [unitId, spec] of Object.entries(netCfg)) {
-    if (realSources.has(unitId)) {
+    if (realBays.has(unitId)) {
       console.warn(`[config] unit ${unitId} is defined by both serial and net config — using net`);
     }
     const channels = new Set<ChannelId>();
     for (const ep of spec.endpoints) {
       for (const channel of Object.keys(ep.channels)) channels.add(channel as ChannelId);
     }
-    realSources.set(unitId, {
+    realBays.set(unitId, {
       kind: spec.kind,
-      source: new NetSource(spec.endpoints),
+      sourceKind: 'net',
+      makeSource: (): TelemetrySource => new NetSource(spec.endpoints),
       channels: [...channels],
     });
   }
 }
+const realBaysWire: LabRealBays = Object.fromEntries(
+  [...realBays].map(([id, r]) => [id, { kind: r.kind, source: r.sourceKind }]),
+);
 
 // Bridge to the TabletAutoTest repo: real bays can launch its automation
 // workflows on their assigned tablet console straight from Test Control.
@@ -122,23 +138,50 @@ const automation = new AutomationBridge(
 );
 
 const fleet = new Fleet({
-  size: Math.max(1, config.fleet?.size ?? 12),
-  model: 'NTL99925',
-  // the mixed floor: rower + elliptical + pilates bays spread among the treadmills
-  rowers: config.fleet?.rowers ?? 2,
-  rowerModel: 'FMRW0826-1D30',
-  ellipticals: config.fleet?.ellipticals ?? 2,
-  ellipticalModel: 'NTEL71426',
-  pilates: config.fleet?.pilates ?? 2,
-  pilatesModel: 'NTPL99926-6FW0',
-  models: config.fleet?.models,
   channels: config.fleet?.channels as Record<string, ChannelId[]> | undefined,
   autorun: config.fleet?.autorun ?? true,
   seedFaults: config.fleet?.seedFaults ?? true,
-  realSources,
+  real: realBays,
   // real bays' unattended-motion watchdog asks the bridge who's in charge
   automationRunning: (unitId) => automation.status(unitId)?.status === 'running',
 });
+
+// --- The lab floor: lab.json when it exists, else the classic config grid
+// (same bay count and kind spread the fixed fleet used to build) ---
+const labStore = new LabStore(LAB_PATH, LAYOUTS_DIR);
+const seedFromConfig = (): LabLayout =>
+  seedLayout({
+    size: Math.max(1, config.fleet?.size ?? 12),
+    // the mixed floor: rower + elliptical + pilates bays spread among the treadmills
+    rowers: config.fleet?.rowers ?? 2,
+    ellipticals: config.fleet?.ellipticals ?? 2,
+    pilates: config.fleet?.pilates ?? 2,
+    models: config.fleet?.models,
+    realKinds: fleet.realKinds(),
+  });
+let layout: LabLayout;
+{
+  const live = labStore.loadLive();
+  const norm = live ? normalizeLayout(live, fleet.realKinds()) : null;
+  if (norm && 'layout' in norm) {
+    layout = norm.layout;
+  } else {
+    if (norm) console.warn(`[lab] lab.json rejected (${norm.error}) — reseeding from config`);
+    layout = seedFromConfig();
+    labStore.saveLive(layout);
+    console.log(`[lab] seeded ${LAB_PATH} from config.json (${layout.rows.length} rows)`);
+  }
+}
+fleet.applyLayout(layout);
+
+/** Install a validated layout: reconcile the roster, persist, tell every client. */
+function commitLayout(next: LabLayout): void {
+  layout = next;
+  fleet.applyLayout(layout); // broadcasts `fleet` itself when the roster changed
+  labStore.saveLive(layout);
+  broadcast({ type: 'lab', layout, real: realBaysWire });
+  void assignScreens(lastDevices); // new bays pick up spare tablets
+}
 
 // --- Model catalog: legacy current.glb (treadmill) + any <MODEL>.glb dropped
 // into models/ by the CAD pipeline (manifest may land before/after the GLB) ---
@@ -148,9 +191,24 @@ const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/; // ids become filenames — 
 
 interface ModelEntry {
   model: string;
+  /** Machine kind: manifest `kind` when present, else inferred from the SKU */
+  kind: MachineKind;
   glbUrl: string | null;
   manifestUrl: string | null;
   default: boolean;
+}
+
+/** A manifest may pin the machine kind; the SKU prefix is the fallback. */
+function modelKind(id: string, manifestPath: string): MachineKind {
+  if (existsSync(manifestPath)) {
+    try {
+      const m = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+      if (MACHINE_KINDS.includes(m.kind)) return m.kind as MachineKind;
+    } catch {
+      /* fall through */
+    }
+  }
+  return kindForModel(id);
 }
 
 /** The legacy/default model id — read from parts-manifest.json when it exists. */
@@ -171,6 +229,7 @@ function modelEntry(id: string): ModelEntry {
   if (id === defaultModelId()) {
     return {
       model: id,
+      kind: modelKind(id, join(MODELS_DIR, LEGACY_MANIFEST)),
       glbUrl: existsSync(join(MODELS_DIR, LEGACY_GLB)) ? `/models/${LEGACY_GLB}` : null,
       manifestUrl: existsSync(join(MODELS_DIR, LEGACY_MANIFEST)) ? `/models/${LEGACY_MANIFEST}` : null,
       default: true,
@@ -178,6 +237,7 @@ function modelEntry(id: string): ModelEntry {
   }
   return {
     model: id,
+    kind: modelKind(id, join(MODELS_DIR, `${id}.manifest.json`)),
     glbUrl: existsSync(join(MODELS_DIR, `${id}.glb`)) ? `/models/${id}.glb` : null,
     manifestUrl: existsSync(join(MODELS_DIR, `${id}.manifest.json`))
       ? `/models/${id}.manifest.json`
@@ -347,6 +407,52 @@ app.get<{ Params: { id: string } }>('/api/units/:id/export.csv', async (req, rep
   return u.engine.exportCsv();
 });
 
+// --- Lab floor layout: rows of bays, edited live; occupied bays are the fleet ---
+
+app.get('/api/lab', async () => ({ layout, real: realBaysWire }));
+
+// Whole-layout replace: the web is the editor, the server reconciles the fleet.
+app.put<{ Body: unknown }>('/api/lab', async (req, reply) => {
+  const norm = normalizeLayout(req.body, fleet.realKinds());
+  if ('error' in norm) return reply.code(400).send({ error: norm.error });
+  commitLayout(norm.layout);
+  return { layout, real: realBaysWire };
+});
+
+// Back to the config.json grid (also what a fresh install boots into).
+app.post('/api/lab/reset', async () => {
+  commitLayout(seedFromConfig());
+  return { layout, real: realBaysWire };
+});
+
+app.get('/api/lab/layouts', async () => labStore.list());
+
+app.put<{ Params: { name: string } }>('/api/lab/layouts/:name', async (req, reply) => {
+  const name = req.params.name.trim();
+  if (!LabStore.validName(name)) return reply.code(400).send({ error: 'invalid layout name' });
+  labStore.save(name, layout);
+  return { ok: true, layouts: labStore.list() };
+});
+
+app.post<{ Params: { name: string } }>('/api/lab/layouts/:name/load', async (req, reply) => {
+  const name = req.params.name.trim();
+  if (!LabStore.validName(name)) return reply.code(400).send({ error: 'invalid layout name' });
+  const saved = labStore.load(name);
+  if (!saved) return reply.code(404).send({ error: `no saved layout: ${name}` });
+  const norm = normalizeLayout(saved, fleet.realKinds());
+  if ('error' in norm) return reply.code(409).send({ error: `saved layout invalid: ${norm.error}` });
+  commitLayout(norm.layout);
+  return { layout, real: realBaysWire };
+});
+
+app.delete<{ Params: { name: string } }>('/api/lab/layouts/:name', async (req, reply) => {
+  const name = req.params.name.trim();
+  if (!LabStore.validName(name) || !labStore.delete(name)) {
+    return reply.code(404).send({ error: `no saved layout: ${name}` });
+  }
+  return { ok: true, layouts: labStore.list() };
+});
+
 app.get<{ Querystring: { model?: string } }>('/api/rig', async (req, reply) => {
   const model = req.query.model;
   if (model !== undefined && !MODEL_ID_RE.test(model)) {
@@ -371,7 +477,9 @@ app.put<{ Body: RigConfig }>('/api/rig', async (req, reply) => {
  * remaining connected devices fill unpinned bays in bay order. Re-run on every
  * device rescan so tablets plugged in later get a bay without a restart.
  */
+let lastDevices: { serial: string }[] = [];
 async function assignScreens(devices: { serial: string }[]): Promise<void> {
+  lastDevices = devices;
   const pinned = config.fleet?.screens ?? {};
   const map = new Map<string, string>(Object.entries(pinned));
   if (config.fleet?.autoScreens ?? true) {
@@ -504,6 +612,7 @@ app.register(async (scoped) => {
         events: fleet.recentEvents(EVENT_BACKLOG),
       } satisfies ServerMessage),
     );
+    socket.send(JSON.stringify({ type: 'lab', layout, real: realBaysWire } satisfies ServerMessage));
     socket.send(JSON.stringify({ type: 'rig', rig: loadRig() } satisfies ServerMessage));
     socket.send(JSON.stringify({ type: 'states', states: fleet.statesSnapshot() } satisfies ServerMessage));
     socket.on('close', () => sockets.delete(socket));
@@ -553,4 +662,7 @@ if (await initScreens(config.scrcpyDir)) {
 }
 
 await app.listen({ port: config.port, host: '127.0.0.1' });
-console.log(`TwinView server on http://127.0.0.1:${config.port} (${fleet.units().length} units)`);
+const bayCount = layout.rows.reduce((n, r) => n + r.bays.length, 0);
+console.log(
+  `TwinView server on http://127.0.0.1:${config.port} (${fleet.units().length} units in ${bayCount} bays, ${layout.rows.length} rows)`,
+);
