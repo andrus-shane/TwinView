@@ -18,6 +18,124 @@ Repo: https://github.com/andrus-shane/TwinView (private) — this directory is a
 - Frontend: procedural placeholder treadmill (`web/src/scene/fallback.ts`) with pre-bound rig; click part → bind channels/roles (persists to `models/rig.json` via PUT /api/rig); deck tilts to measured incline (ghost wireframe = commanded, 2× visual exaggeration); belt texture scrolls at measured speed; parts tint amber/red on deviation; mock console canvas is textured onto the 3D console screen; uPlot cmd-vs-meas sparklines per channel.
 - Everything verified end-to-end: scenario run, fault injection → FAIL event → clear → recovery, slider setpoints, bind/save/remove, rig persistence.
 
+## Update 2026-08-18 — unattended-motion safety watchdog (real bays)
+
+Incident same day: a TabletAutoTest matrix run lost its adb transport mid-run; the
+workflow's wrap-up never reached the console and the belt kept running at ~13 mph.
+The twin's tolerance logic can't catch this — the run had mirrored its setpoints into
+the twin, so expected ≈ measured and every channel read `ok`.
+
+New watchdog (`TwinEngine.watchdogTick`, server/src/twin.ts): on real-source bays
+only, if the kind's motion channel (treadmill → `belt_speed`, floor 0.5 mph) reads
+above the floor for 5 s while (a) no automation run is `running` for that unit
+(bridge status threaded through `FleetOptions.automationRunning`) and (b) no scenario
+is active, it raises a `severity: 'alarm'` event (new severity, above `fail`) and
+sets `TwinState.unattended`. The web shows a pulsing red banner over the viewport
+(`SafetyBanner.tsx`, driven by the level-triggered state flag, so it also appears for
+clients that connect mid-incident); alarms also hit the Lab Detections feeds and the
+server log (`[SAFETY] …` via console.error in main.ts). Deliberate choices:
+- 10 s coast-down grace after a run/scenario ends, so teardown never false-fires.
+- Setpoints are IGNORED as an "in charge" signal — stale mirrored setpoints over a
+  dead run are exactly the incident.
+- A stale telemetry link does NOT clear an active alarm (dead transport over a moving
+  belt was the incident); it clears only on a fresh reading < 0.3 mph or a controller
+  taking over. Staleness alone never RAISES the alarm either.
+- Known blind spot: the automation bridge forgets detached runs across a TwinView
+  restart, so a restart under a healthy in-flight run alarms once the grace lapses —
+  false positive preferred over missing a genuinely orphaned belt.
+- The warn/fail tolerance logic is untouched; mock bays are exempt.
+
+## Update 2026-08-20 — Pi 5 test-harness expansion (planning docs)
+
+The bench rig is being expanded from the Zero 2 W (tach + incline only) into a Pi 5
+system-test harness: 8× thermocouples, DC V/A on three rails, AC mains metering,
+CAN FD + RS485 bus taps, and relay actuation of the safety key. Three docs:
+
+- `docs/test-harness-parts.md` — research-verified parts list with prices/links
+  (silicon ≈$650 + bench essentials ≈$650), revised per the design review.
+- `docs/test-harness-parts.html` — the same list as a self-contained website
+  (product photos, interactive build total). Serve `docs/` statically to view.
+- `docs/test-harness-review.md` — the design review (council of 4 + synthesis).
+  Read before wiring anything: it has the bring-up order, the grounding rules
+  (one bond point at console ground), and the hard errors it caught (the CAN FD
+  HAT's `spi1-3cs` overlay steals the encoder's GPIO17 — use `spi1-1cs`; the
+  3-HAT stack is not viable — Sequent DAQ goes off-board on an I2C pigtail;
+  M.2 HAT+ dropped in favor of a USB 3 SSD).
+
+Known software migration work when the Pi 5 lands: `setup_adb_bridge.sh` is a
+Zero 2 W dwc2 idiom (fails on Pi 5), `rig_monitor.py`'s single 10 Hz loop needs
+per-sensor threads before ~25 channels, udev rules by USB serial number before
+3+ ttyUSB devices, `tach_quad.c` should resolve the gpiochip by label instead of
+hardcoding `/dev/gpiochip0`. Open hardware unknowns: actual rail currents (>30A
+has no verified sensor), motor-armature voltage channel unspecced, relay-board
+ground topology needs a bench continuity check.
+
+## Update 2026-09-14 — NTL17915 treadmill conversion (second treadmill model)
+
+`models/NTL17915.glb` (21.7 MB, 172-name manifest, 210 parts, 1.68M tris, WITH creased normals,
+bbox 0.90×1.44×1.86 m) + `models/NTL17915.manifest.json` + starter `models/rig.NTL17915.json`
+(belt + deck only; bind rollers / motor / console_screen in the UI). Raw GLB 80.8 MB gitignored.
+Same `sw_tessellate_glb.py` → `optimize_glb.mjs` pipeline, ~23 min tessellation, no crashes.
+
+**"Looks like playdough" (first cut, 4.6 MB / 763k tris) and the fix.** Two causes, measured
+with per-part edge-length stats: (1) this assembly's SolidWorks DISPLAY tessellation is ~3×
+coarser than the earlier units on big curved shells (console shell `301169-1` p90 edge
+15.7 mm vs 4.6 mm on the NTL99925 display `456481-3`; `GetTessTriangles` just returns whatever
+image quality the docs were saved with), and (2) the default 35 % simplify stretched those to
+~3 cm (21 % of the shell's triangles had an edge > 2 cm), then the viewer's
+`computeVertexNormals()` on welded geometry smoothed across every hard edge → melted
+plastic. `optimize_glb.mjs` grew env knobs, defaults unchanged so the four older models
+reproduce byte-for-byte: `SIMPLIFY_RATIO` (0.35), `SIMPLIFY_ERROR` (0.002), `CREASE_DEG`
+(off) which writes a NORMAL attribute with creased smoothing (shared vertices under the angle,
+split above it; only 278k of 1.1M vertices split, so the index stays welded for meshopt and
+the lab LOD). NTL17915 was rebuilt with `SIMPLIFY_RATIO=0.75 CREASE_DEG=40`. Flat per-face
+normals were tried first and are a trap: on curved shells no two faces share a normal, weld
+merges nothing (6.6M verts), and the simplifier cannot collapse a triangle soup. For a truly
+crisp NTL17915 the remaining lever is SolidWorks-side: raise image quality (or use
+`IBody2::GetTessellation` with tight tolerances + `NeedVertexNormal`) and re-tessellate.
+
+Source: `~NTL17915_CROSSBAR_MOD_V2.SLDASM` was NOT a pack-and-go zip. The root + 60 files sat
+in `Downloads\NTL17915\` and its other 129 parts were saved loose in `Downloads\` (SolidWorks
+had all 175 open when we started). Consolidated into `cad/NTL17915/` (190 files, lock files
+`~$*` excluded, root renamed `NTL17915.SLDASM` so the model id is clean). Three references
+unresolved and harmless: `119425.SLDPRT`, a Hopi console part in the PDM vault, a PCB
+display-board assembly on `R:`.
+
+Rig candidates from `_analyze_glb.mjs` (world AABBs): belt = `Walking Belt 24887-1`; deck =
+`349822-2` (0.71×0.03×1.26 m under the belt); rollers = the two `279140-1` instances (48 mm
+dia, z=0.21 front / z=1.56 rear; GLTFLoader renames the second `279140-1_1`); motor
+candidates `431727-1` / `204844-1` (front-left under the hood `347853-2`); console shell
+`301169-1/-2`, display housing `349423-1` (also duplicated). 34 small parts stay suppressed.
+
+New gotchas:
+- `OpenDoc6` needs an ABSOLUTE path. Launched via `Start-Process -WorkingDirectory`, a
+  relative `cad\...\X.SLDASM` fails with error 2 (file not found): SolidWorks resolves it
+  against its own cwd, not python's.
+- A fresh SolidWorks launched by `Dispatch` races the dialog watchdog: it closed a blank
+  startup dialog and SW died (`RPC failed`) during the first `OpenDoc6`. Pre-launch
+  `SLDWORKS.exe`, wait for RSS > 500 MB to settle (~30 s), then run the script so it attaches.
+- SolidWorks resolved the copied root's component references to the ORIGINAL absolute paths
+  in `Downloads\`, not the siblings in `cad/NTL17915/`. Harmless here (identical bytes, and
+  no unsuppress so no `Save3`), but the `cad/` copy is only self-contained once the Downloads
+  originals are gone or the references are re-pointed (open in SW, Save As with references).
+  A conversion that does checkpoint-save would have written into the Downloads files.
+- `optimize_glb.mjs` prints "Triangles before simplify: 0k" for these raw GLBs (non-indexed
+  primitives; the count only sees indices). Cosmetic.
+- Bays take their CAD model from the machine kind (`NTL99925` for every treadmill), so the
+  header picker alone never shows a second treadmill in a unit view. Added a per-bay
+  override: `config.json` -> `fleet.models: { "u03": "NTL17915" }` (unit id -> model id,
+  `FleetOptions.models`, wins over the kind default). Pick a bay of the matching KIND: the
+  override does not change the kind, so putting a treadmill GLB on the rower bay `u02` gives
+  rower channels on treadmill geometry. `tsx watch` does not watch `config.json`; restart
+  the server after editing it. The bind dialog writes to the PICKER's rig, so keep the header
+  set to the same model as the focused bay while binding.
+- Same shape for channels: `fleet.channels: { "u03": ["belt_speed", "incline"] }` restricts a
+  mock bay's twin to a channel subset (reuses the real-hardware `instrumentedChannels` path
+  in `TwinEngine`; gauges and detections for the other channels disappear; the mock fault buttons stay but faults on untracked channels never surface).
+- three.js `GLTFLoader` sanitizes node names (`PropertyBinding.sanitizeNodeName`: spaces ->
+  `_`), so rig `nodeName`s must use the sanitized form: `Walking_Belt_24887-1`, not the
+  manifest's `Walking Belt 24887-1` (the parts panel flags the mismatch as "not in model").
+
 ## Update 2026-07-13 (old machine, final session) — CAD conversion runbook
 
 Shane installed SolidWorks 2024 on the fast machine, so CAD conversion moves there.

@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi 5 system-test harness — parts list</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --surface2:#eef0f4; --text:#16181d; --muted:#5b6272;
+  --border:#e2e5ea; --accent:#4653c9; --accent-soft:#eceefc; --green:#177452; --green-soft:#e2f4ec;
+  --amber:#8a5a0a; --amber-soft:#fdf3df; --red:#a32d2d; --red-soft:#fcecec; --chip:#f1f2f6;
+  --shadow:0 1px 2px rgba(20,22,30,.05),0 8px 24px -12px rgba(20,22,30,.12);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#111318; --surface:#1a1d24; --surface2:#22262f; --text:#e8eaf0; --muted:#9aa2b3;
+    --border:#2b3040; --accent:#8d98f2; --accent-soft:#252a48; --green:#5fd3a5; --green-soft:#15302a;
+    --amber:#f0b953; --amber-soft:#332811; --red:#f09595; --red-soft:#3a1c1c; --chip:#252a35;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.5);
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:96px}
+body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:'JetBrains Mono',monospace;font-size:.85em;background:var(--chip);padding:.1em .4em;border-radius:5px}
+pre{font-family:'JetBrains Mono',monospace;font-size:.8rem;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;overflow-x:auto;line-height:1.55}
+.wrap{max-width:1060px;margin:0 auto;padding:0 20px}
+header.top{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+header.top .wrap{display:flex;align-items:center;gap:14px;padding-top:12px;padding-bottom:12px}
+.logo{width:34px;height:34px;border-radius:9px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700;font-size:15px;flex:none}
+.htitle{font-weight:600;font-size:15px;white-space:nowrap}
+.hsub{font-size:12px;color:var(--muted);white-space:nowrap}
+.total-pill{margin-left:auto;background:var(--green-soft);color:var(--green);font-weight:700;padding:7px 16px;border-radius:999px;font-size:14px;white-space:nowrap}
+.total-pill small{font-weight:500;opacity:.8}
+.hero{padding:52px 0 8px}
+.hero h1{font-size:clamp(26px,4.5vw,38px);line-height:1.15;margin:0 0 12px;font-weight:700;letter-spacing:-.02em}
+.hero p{max-width:70ch;color:var(--muted);margin:0 0 6px}
+.meta-row{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 8px}
+.meta-chip{font-size:12px;font-weight:500;background:var(--chip);border:1px solid var(--border);padding:4px 11px;border-radius:999px;color:var(--muted)}
+nav.cats{display:flex;flex-wrap:wrap;gap:8px;padding:14px 0 6px}
+nav.cats a{font-size:13px;font-weight:500;background:var(--surface);border:1px solid var(--border);padding:6px 13px;border-radius:999px;color:var(--text)}
+nav.cats a:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
+section.cat{padding:34px 0 6px}
+.cat-head{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+.cat-num{font-family:'JetBrains Mono',monospace;color:var(--accent);font-weight:600;font-size:14px}
+.cat-head h2{font-size:21px;margin:0;font-weight:650;letter-spacing:-.01em}
+.cat-sub{color:var(--muted);font-size:14px;margin:2px 0 18px}
+.card{display:flex;gap:20px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:var(--shadow)}
+.card.primary{border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.thumb{flex:none;width:150px;height:150px;border-radius:12px;background:#fff;border:1px solid var(--border);display:grid;place-items:center;overflow:hidden}
+.thumb img{max-width:88%;max-height:88%;object-fit:contain}
+.thumb.noimg{background:var(--surface2)}
+.thumb.noimg img{display:none}
+.thumb .ph{display:none;color:#a0a6b5;font-size:11px;text-align:center;padding:8px}
+.thumb.noimg .ph{display:block}
+.card-body{flex:1;min-width:0}
+.badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.badge{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:3px 9px;border-radius:6px}
+.badge.primary{background:var(--accent-soft);color:var(--accent)}
+.badge.alt{background:var(--chip);color:var(--muted)}
+.badge.diy{background:var(--amber-soft);color:var(--amber)}
+.badge.reject{background:var(--red-soft);color:var(--red)}
+.badge.stock{background:var(--green-soft);color:var(--green)}
+.badge.warn{background:var(--amber-soft);color:var(--amber)}
+.card h3{margin:0 0 4px;font-size:16.5px;font-weight:600;line-height:1.35}
+.card .desc{font-size:13.5px;color:var(--muted);margin:0 0 10px}
+.buy-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.price{font-weight:700;font-size:17px}
+.price small{font-weight:500;color:var(--muted);font-size:12px}
+.btn{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:7px 14px;border-radius:9px;background:var(--accent);color:#fff !important;border:none}
+.btn:hover{filter:brightness(1.08);text-decoration:none}
+.btn.ghost{background:var(--surface2);color:var(--text) !important;border:1px solid var(--border)}
+.pick{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);user-select:none;cursor:pointer}
+.pick input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.callout{border-radius:12px;padding:13px 16px;font-size:13.5px;margin:10px 0;border:1px solid}
+.callout b:first-child{display:block;margin-bottom:2px}
+.callout.warn{background:var(--amber-soft);border-color:color-mix(in srgb,var(--amber) 30%,transparent);color:var(--text)}
+.callout.danger{background:var(--red-soft);border-color:color-mix(in srgb,var(--red) 30%,transparent);color:var(--text)}
+.callout ol{margin:6px 0 0;padding-left:20px}
+.notes{font-size:13.5px;color:var(--muted);padding-left:18px;margin:8px 0 0}
+.notes li{margin-bottom:4px}
+.summary{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;margin:36px 0 16px;box-shadow:var(--shadow)}
+.summary h2{margin:0 0 14px;font-size:20px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.04em;text-transform:uppercase;padding:8px 10px;border-bottom:1px solid var(--border)}
+td{padding:9px 10px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none;font-weight:700}
+td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
+.open-list{padding-left:20px;font-size:14px}
+.open-list li{margin-bottom:8px}
+footer{color:var(--muted);font-size:12.5px;padding:28px 0 48px;border-top:1px solid var(--border);margin-top:36px}
+@media (max-width:640px){
+  .card{flex-direction:column}
+  .thumb{width:100%;height:170px}
+  .pick{margin-left:0}
+  .hsub{display:none}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <div class="logo">P5</div>
+    <div>
+      <div class="htitle">Pi 5 test-harness parts</div>
+      <div class="hsub">treadmill system-test instrumentation</div>
+    </div>
+    <div class="total-pill" id="totalPill">Build total: $0 <small>(0 items)</small></div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="hero">
+  <h1>Raspberry Pi 5 system-test harness<br>parts &amp; purchasing list</h1>
+  <p>Build-out for the treadmill test bench: power metering, thermocouples, bus taps, and safety-key actuation around one Pi 5 hub. Every pick below survived a 3-vote adversarial verification pass against live vendor pages.</p>
+  <div class="meta-row">
+    <span class="meta-chip">Prices verified 2026-08-18 → 19</span>
+    <span class="meta-chip">Design review applied 2026-08-20</span>
+    <span class="meta-chip">Vendors: Amazon · Digi-Key · Adafruit · SparkFun · Waveshare · direct</span>
+    <span class="meta-chip">Already owned: WT901 IMU · Taiss E38S6 encoder</span>
+  </div>
+  <nav class="cats">
+    <a href="#owned">0 · On the bench</a><a href="#compute">1 · Compute</a><a href="#thermo">2 · Thermocouples</a><a href="#dc">3 · DC rails</a><a href="#ac">4 · AC mains</a><a href="#canfd">5 · CAN FD</a><a href="#rs485">6 · RS485</a><a href="#highamp">7 · &gt;10A DC</a><a href="#relay">8 · Safety-key relay</a><a href="#bench">9 · Bench extras</a><a href="#summary">Total</a>
+  </nav>
+  <div class="callout warn"><b>Architecture rules from the 2026-08-20 design review</b> One board on the 40-pin header (the CAN FD HAT, configured <code>spi1-1cs</code> — the wiki's <code>spi1-3cs</code> steals the belt encoder's GPIO17). Sequent thermocouple board runs off-board on an I2C pigtail with its own 5V — never mid-stack (the 3-HAT stack is not physically or thermally viable). Skip the M.2 HAT+; boot from a USB 3 SSD. One ground bond point at console ground; everything else isolated. Second I2C bus (<code>i2c3</code> on GPIO4/5) for the Qwiic power-monitor chain. Full analysis and bring-up order: <code>docs/test-harness-review.md</code>.</div>
+</div>
+
+<!-- ============ 0 ON THE BENCH ============ -->
+<section class="cat" id="owned">
+  <div class="cat-head"><span class="cat-num">00</span><h2>Already on the bench</h2></div>
+  <p class="cat-sub">The working rig this expansion builds on — nothing here needs purchasing.</p>
+
+  <div class="card">
+    <div class="thumb"><img data-img="pi-zero2w" alt="Raspberry Pi Zero 2 W — current rig host"><div class="ph">Pi Zero 2 W</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>Raspberry Pi Zero 2 W — current rig host</h3>
+      <p class="desc">192.168.1.134 on the isolated bench Wi-Fi, running rig-monitor.service: streams incline.* + tach.* over TCP:5000 at 10 Hz into TwinView. Interrupt-limited — the reason for the Pi 5 (x4 tach decode saturated at ~11 mph, forcing x1). Stays useful as a spare or dedicated tach+incline satellite after migration.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="thumb"><img data-img="taiss-encoder" alt="Taiss E38S6-600-24G quadrature encoder — belt speed"><div class="ph">Taiss encoder</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>Taiss E38S6-600-24G quadrature encoder — belt speed</h3>
+      <p class="desc">600 PPR, channels A/B on GPIO17/27, x1 decode in the tach_quad C child. Calibrated: WHEEL_CIRC_M = 0.2388, reads 14.038 vs 14.035 mph true. Channel A on GPIO17 is exactly why the CAN FD HAT must use spi1-1cs (§5). Re-run the speed sweep after any rewire.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="thumb"><img data-img="wt901" alt="WitMotion WT901 IMU — incline"><div class="ph">WT901 IMU</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>WitMotion WT901 IMU — incline</h3>
+      <p class="desc">Gravity inclinometer on I2C bus 1 @ 0x50: level-calibrated pitch (bubble-level ground truth) → % grade, with hot-reloading tare offsets. Migrates as-is — but keep it on i2c-1: 0x50 on i2c-0 collides with HAT ID EEPROMs. Recalibrate after remounting. (Photo shows the -485 variant; ours is the I2C module.)</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="thumb noimg"><div class="ph">tablet + adb</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>Console tablet (SZ00000141) + adb bridge</h3>
+      <p class="desc">adb rides USB through the Pi — permanent serial 127.0.0.1:5555 via adb-bridge/adb-server services, with an nc relay reaching the bench subnet from the wired box. The bridge concept carries over, but setup_adb_bridge.sh is a Zero 2 W dwc2 idiom that needs a Pi 5 rewrite. This USB link also defines the harness's one ground bond point.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="thumb"><img data-img="mega2560" alt="Arduino Mega 2560 test rig"><div class="ph">Mega 2560</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>Arduino Mega 2560 test rig</h3>
+      <p class="desc">The predecessor rig on COM11 (iFIT_TestingSuite.v25, 115200 baud) — stays as-is for suite work. The Pi firmware's calibration constants mirror it.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="thumb"><img data-img="hx711" alt="HX711 load-cell amplifier + load cell"><div class="ph">HX711</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>HX711 load-cell amplifier + load cell</h3>
+      <p class="desc">Unused capacity from the Arduino rig — a candidate belt-tension or user-weight channel for a later phase of the harness.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="thumb noimg"><div class="ph">DUT + twin</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge stock">Owned</span></div>
+      <h3>NTL99925 treadmill + TwinView stack</h3>
+      <p class="desc">The DUT plus its digital twin: the net source parses incline.grade / tach.mph per network_sensors.json (server :8720, web :5173). Every new harness channel — power, temperatures, bus frames — needs a pattern entry and a twin channel definition; that's the software side of this expansion.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 1 COMPUTE ============ -->
+<section class="cat" id="compute">
+  <div class="cat-head"><span class="cat-num">01</span><h2>Compute — Raspberry Pi 5 (8GB)</h2></div>
+  <p class="cat-sub">The hub: collects every sensor, taps both buses, drives the relay, bridges ADB to the tablet.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="canakit-pi5" alt="CanaKit Raspberry Pi 5 Starter Kit"><div class="ph">Raspberry Pi 5<br>Starter Kit</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span></div>
+      <h3>CanaKit Starter Kit — 128GB / Turbine Black</h3>
+      <p class="desc">Pi 5 8GB + USB-C PD PSU + PWM fan &amp; Mega heatsink + 128GB microSD + card reader + 2× micro-HDMI cables. One SKU covers board, power, cooling, and storage. Authorized reseller — low counterfeit risk.</p>
+      <div class="buy-row">
+        <span class="price">$269.95</span>
+        <a class="btn" href="https://www.canakit.com/raspberry-pi-5-8gb.html" target="_blank" rel="noopener">Buy at CanaKit</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="269.95" data-name="CanaKit Pi 5 Starter Kit" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb noimg"><div class="ph">Pi 5 board only</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Alternate</span></div>
+      <h3>Pi 5 8GB board only</h3>
+      <p class="desc">Then source PSU/cooler separately. $175 is ~2.2× launch MSRP after the 2026 DRAM-shortage hikes — nobody verified beats it. Both sellers confirmed on raspberrypi.com's authorized-reseller directory.</p>
+      <div class="buy-row">
+        <span class="price">$175.00</span>
+        <a class="btn ghost" href="https://www.canakit.com/raspberry-pi-5-8gb.html" target="_blank" rel="noopener">CanaKit</a>
+        <a class="btn ghost" href="https://www.pishop.us/product/raspberry-pi-5-8gb/" target="_blank" rel="noopener">PiShop.us</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="175" data-name="Pi 5 8GB board only">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="rpi-ssd-kit" alt="Raspberry Pi SSD Kit"><div class="ph">RPi SSD Kit</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge reject">Dropped in review</span></div>
+      <h3>Official Raspberry Pi SSD Kit (M.2 HAT+ &plus; NVMe)</h3>
+      <p class="desc">Dropped: the M.2 HAT+ can't stack under the CAN FD HAT (no supported boards above it, header terminates flush). Boot from any name-brand USB 3 SSD instead (~$35, 256GB+) — same logging benefit, zero header conflict, and continuous CAN logging kills microSD cards anyway.</p>
+      <div class="buy-row">
+        <span class="price">—</span>
+        <a class="btn ghost" href="https://www.raspberrypi.com/products/ssd-kit/" target="_blank" rel="noopener">original kit page</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2 THERMOCOUPLES ============ -->
+<section class="cat" id="thermo">
+  <div class="cat-head"><span class="cat-num">02</span><h2>Thermocouples ×8 (K-type)</h2></div>
+  <p class="cat-sub">Motor, controller heatsink, deck, belt, ambient — eight temperature points into one HAT.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="sequent-tc8" alt="Sequent Microsystems Eight Thermocouples DAQ HAT"><div class="ph">Sequent 8-TC HAT</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span><span class="badge warn">Order soon</span></div>
+      <h3>Sequent Microsystems Eight Thermocouples DAQ HAT (SM-I-019)</h3>
+      <p class="desc">All 8 channels on one board — J/K/T/N/E/B/R/S types, 24-bit ΔΣ ADC, cold-junction compensation, up to 40 SPS. Explicit Pi Zero→5 support. I2C-only (GPIO2/3). <a href="https://github.com/SequentMicrosystems/smtc-rpi" target="_blank" rel="noopener">Userspace driver on GitHub</a>. Review: mount it off-board on a 15-25cm I2C pigtail with its own 5V — never mid-stack, heat corrupts the cold-junction reference. Set the DIP to disable its onboard RS485 (it rides the Pi UART). The DAQ ships with zero thermocouples — order probes with it (§9).</p>
+      <div class="buy-row">
+        <span class="price">$120.00</span>
+        <a class="btn" href="https://sequentmicrosystems.com/products/eight-thermocouples-daq-8-layer-stackable-hat-for-raspberry-pi" target="_blank" rel="noopener">Buy direct</a>
+        <a class="btn ghost" href="https://www.amazon.com/Eight-Thermocouples-8-Layer-Stackable-Raspberry/dp/B0CHPNS67Q" target="_blank" rel="noopener">Amazon (mfr-sold)</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="120" data-name="Sequent 8-ch thermocouple HAT" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>Availability flag</b> The Pi Hut (UK) lists this HAT as discontinued while the manufacturer still stocks it — if it's the pick, don't sit on the order. One verifier also saw $95 vs the confirmed $120 on Sequent's own site; confirm at checkout. Accuracy figures are % of electrical full scale (vendor-claimed), not °C — K-type wire tolerance dominates either way.</div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="mcc134" alt="MCC 134 thermocouple DAQ HAT"><div class="ph">MCC 134</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Alternate</span></div>
+      <h3>2× MCC 134 DAQ HAT (stacked)</h3>
+      <p class="desc">4 channels each, stacked via A0-A2 address jumpers. 24-bit, CJC, open-TC detection — but 1 sample/sec minimum interval, and MCC advises mounting far from the Pi's heat, which stacking two defeats for one board.</p>
+      <div class="buy-row">
+        <span class="price">$298 <small>(2 × $149)</small></span>
+        <a class="btn ghost" href="https://digilent.com/shop/mcc-134-thermocouple-measurement-daq-hat-for-raspberry-pi/" target="_blank" rel="noopener">Digilent</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="298" data-name="2× MCC 134">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="max31856" alt="Adafruit MAX31856 thermocouple amplifier"><div class="ph">MAX31856</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge diy">DIY</span></div>
+      <h3>8× Adafruit MAX31856 breakout</h3>
+      <p class="desc">One SPI amplifier per channel; universal TC types; needs 8 chip-select lines and per-board CJC layout care. Marginal savings for substantially more integration work.</p>
+      <div class="buy-row">
+        <span class="price">$140 <small>(8 × $17.50)</small></span>
+        <a class="btn ghost" href="https://www.adafruit.com/product/3263" target="_blank" rel="noopener">Adafruit #3263</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="140" data-name="8× MAX31856">add to build</label>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3 DC RAILS ============ -->
+<section class="cat" id="dc">
+  <div class="cat-head"><span class="cat-num">03</span><h2>DC rail V/A — tablet · console · controller</h2></div>
+  <p class="cat-sub">Three rails, each under 10A: one I2C power monitor per rail, daisy-chained.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="ina228" alt="Adafruit INA228 power monitor breakout"><div class="ph">INA228</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span></div>
+      <h3>3× Adafruit INA228 breakout</h3>
+      <p class="desc">20-bit ΔΣ, up to 85V bus, 10A through the onboard 15mΩ 0.1% shunt. I2C / STEMMA QT chainable, address-configurable (0x40-0x4F — no collisions with the rest of the bus; all three ship at 0x40, so set A0/A1 jumpers apart before first power-up). Kernel support is the <code>ina238</code> hwmon driver (no stock Pi overlay) — plan on the Adafruit Python library. Note: sustained ~10A puts ~1.5W into the small shunt — it runs warm at the top of range.</p>
+      <div class="buy-row">
+        <span class="price">$44.85 <small>(3 × $14.95)</small></span>
+        <a class="btn" href="https://www.adafruit.com/product/5832" target="_blank" rel="noopener">Adafruit #5832</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="44.85" data-name="3× INA228" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 4 AC MAINS ============ -->
+<section class="cat" id="ac">
+  <div class="cat-head"><span class="cat-num">04</span><h2>AC mains power metering — 120V / 15-20A</h2></div>
+  <p class="cat-sub">Whole-machine draw, logged into the Pi's telemetry stream. Primary/alternate swapped in the 2026-08-20 review: a hand-built PZEM box means splitting the line cord (a CT around a 2-conductor cord reads ≈ zero — hot and neutral cancel), tapping L/N, an enclosure, fusing, and EHS review. Buy the listed device.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="shelly-em50" alt="Shelly Pro EM-50 energy meter"><div class="ph">Shelly Pro EM-50</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span></div>
+      <h3>Shelly Pro EM-50</h3>
+      <p class="desc">DIN-rail, two 50A split-core CT channels (mains + a motor leg), 100-260V, ±1% (5-50A), properly isolated by architecture. Speaks Wi-Fi/LAN RPC/MQTT rather than Modbus — on the isolated bench subnet the Pi polls it over HTTP just fine. Home Depot had it at $94.99 promo. Note: a ~1 Hz meter — if motor inrush matters, that's a scope/clamp measurement, not this.</p>
+      <div class="buy-row">
+        <span class="price">$119.99</span>
+        <a class="btn" href="https://us.shelly.com/products/shelly-pro-em-50" target="_blank" rel="noopener">us.shelly.com</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="119.99" data-name="Shelly Pro EM-50" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="pzem004t" alt="PZEM-004T v3 with split-core CT"><div class="ph">PZEM-004T v3</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Optional redundant channel</span><span class="badge warn">Fragile listing</span></div>
+      <h3>PZEM-004T v3 — 100A split-core CT bundle</h3>
+      <p class="desc">Module + housing + CT + PC software. 80-260VAC self-powered (120V confirmed against the Peacefair datasheet), 0.5%, Modbus-RTU over TTL serial. The verified listing had 1 unit left from a zero-review drop-ship seller — the bundle reappears under rotating ASINs; match the "AC 80-260V, 100A" spec line. Bare modules run $16.65-21.61.</p>
+      <div class="buy-row">
+        <span class="price">$25.99</span>
+        <a class="btn ghost" href="https://www.amazon.com/Peacefair-PZEM-004T-Monitoring-Housing-Software/dp/B0F3J2CM2J" target="_blank" rel="noopener">Amazon</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="25.99" data-name="PZEM-004T v3 CT bundle">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout danger"><b>If using the PZEM: isolation stage required</b> Its mains-to-TTL isolation is unverified either way. Treat the TTL pins as mains-referenced: connect through an <b>isolated USB-TTL adapter that supplies isolated 5V out (the PZEM's opto side needs external 5V), or an ADuM1201 + B0505S stage (~$10)</b> — never straight into Pi GPIO.</div>
+
+  <div class="callout warn"><b>Do not buy the standard Eastron SDM120M</b> Nameplate 230V, operating range 176-276VAC — it physically cannot meter a US 120V circuit. No true Modbus-RTU DIN alternative for 120V survived verification.</div>
+
+  <div class="card">
+    <div class="thumb noimg"><div class="ph">isolated USB-TTL</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Required with PZEM</span></div>
+      <h3>Isolated USB-TTL stage for the PZEM serial link</h3>
+      <p class="desc">Isolated USB-TTL adapter (with isolated 5V out) or ADuM1201 + B0505S isolator board between the PZEM's TTL pins and the Pi.</p>
+      <div class="buy-row">
+        <span class="price">~$10</span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="10" data-name="Isolated USB-TTL stage">add to build</label>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5 CAN FD ============ -->
+<section class="cat" id="canfd">
+  <div class="cat-head"><span class="cat-num">05</span><h2>CAN FD tap</h2></div>
+  <p class="cat-sub">Listening to the machine's CAN bus; two channels = two buses, or listen + inject.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="waveshare-canfd" alt="Waveshare 2-CH CAN FD HAT"><div class="ph">2-CH CAN FD HAT</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span><span class="badge warn">Pi 5: community-proven</span></div>
+      <h3>Waveshare 2-CH CAN FD HAT (SKU 17075)</h3>
+      <p class="desc">Dual MCP2518FD on SPI, mainline <code>spi-mcp251xfd</code> socketcan driver — no vendor driver. <b>Use <code>spi1-1cs</code>, not the wiki's <code>spi1-3cs</code></b> — the 3-CS variant pinmuxes GPIO17 away, which is the belt encoder's channel A (verify with <code>raspi-gpio get 16 17 18</code>). Bring interfaces up <b>listen-only, termination off</b> — a tap that ACKs frames or emits error frames is an active bus disruptor. Vendor docs stop at Pi 4B; community reports (<a href="https://github.com/raspberrypi/linux/issues/6407" target="_blank" rel="noopener">#6407</a>, <a href="https://github.com/raspberrypi/linux/issues/6644" target="_blank" rel="noopener">#6644</a>) prove Pi 5 operation but note delayed-RX / SPI-overflow quirks under heavy periodic traffic.</p>
+      <pre>dtparam=spi=on
+dtoverlay=spi1-1cs
+dtoverlay=mcp251xfd,spi0-0,interrupt=25
+dtoverlay=mcp251xfd,spi1-0,interrupt=24</pre>
+      <div class="buy-row">
+        <span class="price">$46.99</span>
+        <a class="btn" href="https://www.waveshare.com/2-ch-can-fd-hat.htm" target="_blank" rel="noopener">Waveshare</a>
+        <a class="btn ghost" href="https://www.waveshare.com/wiki/2-CH_CAN_FD_HAT" target="_blank" rel="noopener">Wiki</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="46.99" data-name="Waveshare 2-CH CAN FD HAT" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="pcan-usb-fd" alt="PEAK PCAN-USB FD adapter"><div class="ph">PCAN-USB FD</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Alternate — pro grade</span><span class="badge stock">In stock</span></div>
+      <h3>PEAK PCAN-USB FD (IPEH-004022)</h3>
+      <p class="desc">Works out of the box: mainline <code>peak_usb</code> driver, already enabled in the Pi 5 kernel config. The escape hatch if the treadmill bus turns out chatty enough to trip the Waveshare quirks.</p>
+      <div class="buy-row">
+        <span class="price">$368.00</span>
+        <a class="btn ghost" href="https://www.gridconnect.com/products/can-usb-fd-adapter-pcan-usb-fd" target="_blank" rel="noopener">Grid Connect</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="368" data-name="PCAN-USB FD">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb noimg"><div class="ph">CANable 2.0</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge reject">Not recommended</span></div>
+      <h3>CANable 2.0</h3>
+      <p class="desc">Sold out manufacturer-direct (entire Openlight store); stock firmware is slcan with CAN FD still beta, and candleLight/gs_usb has no FD support on its STM32G431. Weak pick for an FD harness at any price.</p>
+      <div class="buy-row"><span class="price">($35)</span>
+        <a class="btn ghost" href="https://openlightlabs.com/products/canable-2-0" target="_blank" rel="noopener">Openlight Labs</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 6 RS485 ============ -->
+<section class="cat" id="rs485">
+  <div class="cat-head"><span class="cat-num">06</span><h2>RS485 tap — passive sniff</h2></div>
+  <p class="cat-sub">Listen-only on the 2-wire bus. All picks verified true galvanic isolation + hardware direction control: the transmitter stays off unless the host writes.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="dsd-sh-u11f" alt="DSD TECH SH-U11F isolated USB-RS485 adapter"><div class="ph">SH-U11F</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span></div>
+      <h3>DSD TECH SH-U11F isolated USB-RS485</h3>
+      <p class="desc">Teardown-verified isolation chain (ADuM3201 + Mornsun B0505LS DC-DC), genuine FTDI, stock <code>ftdi_sio</code>. 4.6★ over 188 ratings, sold by the brand's own storefront.</p>
+      <div class="buy-row">
+        <span class="price">$19.99</span>
+        <a class="btn" href="https://www.amazon.com/DSD-TECH-SH-U11F-Industrial-Application/dp/B083XSG1RG" target="_blank" rel="noopener">Amazon</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="19.99" data-name="DSD TECH SH-U11F" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="waveshare-rs485" alt="Waveshare USB to RS485/422 industrial converter"><div class="ph">USB TO RS485/422</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Alternate</span></div>
+      <h3>Waveshare USB TO RS485/422 (SKU 23949)</h3>
+      <p class="desc">FT232RNL, isolated, 300bps-3Mbps. 120Ω termination is jumpered OFF by default — leave it off when tapping an already-terminated bus (the jumper lives inside the case). Sibling USB TO RS232/485 (B), SKU 26547, is $15.99.</p>
+      <div class="buy-row">
+        <span class="price">$17.99</span>
+        <a class="btn ghost" href="https://www.waveshare.com/usb-to-rs485-422.htm" target="_blank" rel="noopener">Waveshare</a>
+        <a class="btn ghost" href="https://www.waveshare.com/usb-to-rs232-485-b.htm" target="_blank" rel="noopener">(B) model</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="17.99" data-name="Waveshare USB-RS485/422">add to build</label>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 7 >10A DC ============ -->
+<section class="cat" id="highamp">
+  <div class="cat-head"><span class="cat-num">07</span><h2>Above-10A DC sensing — motor-controller rail</h2></div>
+  <p class="cat-sub">Fallback if a rail exceeds the INA228's 10A: hall-effect, isolated current path, up to ±30A.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="sparkfun-acs37800" alt="SparkFun ACS37800 Qwiic power meter"><div class="ph">ACS37800 Qwiic</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span></div>
+      <h3>SparkFun Power Meter ACS37800 (Qwiic, SEN-29259)</h3>
+      <p class="desc">Hall-effect ±30A, isolated current path, I2C address 0x60 — no collision with the INA228s; chains on the same Qwiic/STEMMA QT bus. Secondary I2C-side isolation NOT verified on this board — for an electrically nasty rail prefer the Pololu below.</p>
+      <div class="buy-row">
+        <span class="price">$19.95</span>
+        <a class="btn" href="https://www.sparkfun.com/sparkfun-power-meter-acs37800-qwiic.html" target="_blank" rel="noopener">SparkFun</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="19.95" data-name="SparkFun ACS37800" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="pololu-5410" alt="Pololu ACS37800 isolated power monitor carrier"><div class="ph">Pololu #5410</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Alternate — better isolation</span><span class="badge warn">Backorder</span></div>
+      <h3>Pololu ACS37800 carrier #5410</h3>
+      <p class="desc">Same ±30A IC plus onboard isolated DC-DC and I2C isolator — true secondary isolation, 4800VRMS reinforced. Backorder-only across all three carrier variants as of Aug 2026.</p>
+      <div class="buy-row">
+        <span class="price">$34.95</span>
+        <a class="btn ghost" href="https://www.pololu.com/product/5410" target="_blank" rel="noopener">Pololu</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="34.95" data-name="Pololu ACS37800 #5410">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>Hard cap: ±30A</b> Nothing above 30A survived verification (ACS758-50A breakouts, external-shunt INA setups). Measure or spec the actual rail current before ordering — if it exceeds 30A, this category needs another research pass.</div>
+</section>
+
+<!-- ============ 8 RELAY ============ -->
+<section class="cat" id="relay">
+  <div class="cat-head"><span class="cat-num">08</span><h2>Safety-key relay — 12V loop, GPIO-driven</h2></div>
+  <p class="cat-sub">Remote key pull for fault-injection and stop testing. The surprise finding: the "obvious" boards aren't actually isolated.</p>
+
+  <div class="card primary">
+    <div class="thumb"><img data-img="protosupplies-relay" alt="ProtoSupplies 8-channel 5V relay module"><div class="ph">8-ch relay module</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge primary">Primary</span><span class="badge stock">In stock</span><span class="badge warn">Wiring-dependent</span></div>
+      <h3>ProtoSupplies 8-ch 5V relay module (JD-VCC header)</h3>
+      <p class="desc">True galvanic isolation is achievable — but it ships bypassed. 8 channels = key 1 + key 2 + future fault-injection lines. Inputs active-low.</p>
+      <div class="buy-row">
+        <span class="price">$7.95</span>
+        <a class="btn" href="https://protosupplies.com/product/relay-module-5v-x-8-relay-w-opto-isolation/" target="_blank" rel="noopener">ProtoSupplies</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="7.95" data-name="ProtoSupplies 8-ch relay" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout danger"><b>Wiring it for actual isolation</b>
+    <ol>
+      <li>Remove the JD-VCC↔VCC jumper — as shipped it ties coil power to logic power, defeating the optos (the vendor says so on the product page).</li>
+      <li>Power JD-VCC/GND from a separate 5V supply, not the Pi's 5V.</li>
+      <li>Connect only VCC and INx to the Pi — <b>do NOT connect the Pi's ground to the board GND.</b> The board has a single ground net; sharing it silently defeats the isolation.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><b>Review caveats — bench checks before trusting it</b> Continuity-test the actual board's ground topology (reviewers disagreed on whether the recipe is achievable on every revision). Check drive levels: 3.3V GPIO against 5V VCC leaves ~1.7V across the opto LED — marginal on some modules; if so, drive INx via an MCP23017 I2C expander (~$9, also gives opto-buffered inputs for 12V key-state <i>sensing</i>). Bench-test fail-safe with the treadmill unplugged: power loss, reboot, and script kill must all land in "key out". And a <b>hardware E-stop independent of the Pi/relay chain is required before any automated fault injection</b> — the software watchdog can't help if the Pi hangs.</div>
+
+  <div class="card">
+    <div class="thumb"><img data-img="adafruit-4409" alt="Adafruit STEMMA non-latching mini relay"><div class="ph">STEMMA relay</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge alt">Alternate — simplest</span></div>
+      <h3>Adafruit STEMMA non-latching mini relay #4409</h3>
+      <p class="desc">Transistor-buffered, NOT isolated — but contacts rated 2A @ 30VDC are ample headroom for a low-energy 12V key loop if GPIO-side isolation doesn't matter.</p>
+      <div class="buy-row">
+        <span class="price">$6.95</span>
+        <a class="btn ghost" href="https://www.adafruit.com/product/4409" target="_blank" rel="noopener">Adafruit</a>
+        <label class="pick"><input type="checkbox" class="sel" data-price="6.95" data-name="Adafruit #4409 relay">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="thumb noimg"><div class="ph">RPi Relay Board</div></div>
+    <div class="card-body">
+      <div class="badges"><span class="badge reject">Rejected</span></div>
+      <h3>Waveshare RPi Relay Board HAT ($15.99)</h3>
+      <p class="desc">Advertises photocoupler isolation, but the relay coils are fed from the Pi's own rails — the PC817s are interference suppression, not galvanic isolation, and the "Relay_JMP" jumper only selects GPIO pins.</p>
+      <div class="buy-row"><a class="btn ghost" href="https://www.waveshare.com/rpi-relay-board.htm" target="_blank" rel="noopener">Waveshare</a></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 9 BENCH ESSENTIALS ============ -->
+<section class="cat" id="bench">
+  <div class="cat-head"><span class="cat-num">09</span><h2>Bench essentials the silicon total hides</h2></div>
+  <p class="cat-sub">From the design review — estimated prices, not research-verified. The must-haves are pre-checked.</p>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>8× K-type probes + extension wire + mounting</h3>
+      <p class="desc">Ungrounded-junction surface probes (~$10-18 ea), K-type extension wire (yellow +, red − — reversed polarity reads inverted), Kapton/thermal adhesive. The DAQ ships with zero probes; keep one channel on ambient.</p>
+      <div class="buy-row">
+        <span class="price">~$130 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="130" data-name="8× K-type probes + extension wire + mounting" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>Powered USB 3 hub (per-port switchable)</h3>
+      <p class="desc">Pi 5 USB budget is 600mA-1.6A total — 3+ dongles and a charging tablet blow it in every configuration. A uhubctl-capable hub doubles as a tablet-USB-power fault-injection actuator.</p>
+      <div class="buy-row">
+        <span class="price">~$35 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="35" data-name="Powered USB 3 hub" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>Battery-powered handheld oscilloscope</h3>
+      <p class="desc">Highest-ROI tool not on the list: is that bus CAN or UART, is that rail mains-referenced, key-loop polarity — answered on day one. Never put an earth-referenced USB instrument on a possibly-mains-referenced node.</p>
+      <div class="buy-row">
+        <span class="price">~$180 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="180" data-name="Battery-powered handheld oscilloscope">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>True-RMS clamp meter</h3>
+      <p class="desc">Answers the open question that gates §7: what do the rails actually draw?</p>
+      <div class="buy-row">
+        <span class="price">~$50 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="50" data-name="True-RMS clamp meter">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>Hardware E-stop + GFCI</h3>
+      <p class="desc">Physical mushroom button in the motor kill circuit — required before automated fault injection; independent of the Pi/GPIO/relay chain.</p>
+      <div class="buy-row">
+        <span class="price">~$45 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="45" data-name="Hardware E-stop + GFCI" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>MCP23017 I2C expander</h3>
+      <p class="desc">8 outputs to sink the relay inputs + 8 opto-buffered inputs for key/fault state sensing — the free-GPIO budget covers actuate or sense, not both.</p>
+      <div class="buy-row">
+        <span class="price">~$9 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="9" data-name="MCP23017 I2C expander" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>USB 3 SSD, 256GB+</h3>
+      <p class="desc">Replaces the dropped M.2 kit; continuous CAN logging kills microSD cards.</p>
+      <div class="buy-row">
+        <span class="price">~$35 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="35" data-name="USB 3 SSD, 256GB+" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>Pi 5 RTC battery</h3>
+      <p class="desc">Isolated bench network — no NTP on boot.</p>
+      <div class="buy-row">
+        <span class="price">~$5 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="5" data-name="Pi 5 RTC battery" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>UPS for the Pi (different circuit from the DUT)</h3>
+      <p class="desc">Treadmill start surge on a shared breaker kills the logger with the data.</p>
+      <div class="buy-row">
+        <span class="price">~$60 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="60" data-name="UPS for the Pi">add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>Wiring & protection: fuses for every tapped rail, ferrules, twisted pair, DIN rail/enclosure, machine-connector pigtails, labels</h3>
+      <p class="desc">Pigtails for the machine's actual connectors are the biggest hidden bring-up time sink.</p>
+      <div class="buy-row">
+        <span class="price">~$100 <small>est.</small></span>
+        <label class="pick"><input type="checkbox" class="sel" data-price="100" data-name="Wiring & protection" checked>add to build</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>Budget reality</b> The review put the realistic gap between the silicon total and a working bench at $700-1200 — flag it now so the first purchase order doesn't arrive without a single thermocouple.</div>
+</section>
+
+<!-- ============ SUMMARY ============ -->
+<section id="summary">
+  <div class="summary">
+    <h2>Your build</h2>
+    <table id="buildTable">
+      <thead><tr><th>Item</th><th class="r">Price</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="summary">
+    <h2>Still open</h2>
+    <ul class="open-list">
+      <li><b>Rail currents unknown</b> — if the motor-controller rail exceeds 30A, no verified sensing option exists yet. The §9 clamp meter answers this; measure before ordering §7.</li>
+      <li><b>Motor-terminal (armature) voltage channel</b> — the review's highest-value missing measurement (ties to the open coast-down question). Isolated-amplifier problem (AMC1311-class); the armature node is PWM-chopped rectified mains (~170V peaks) — no INA/ACS part touches it directly.</li>
+      <li><b>Pi 5 8GB below $175?</b> — Digi-Key/Mouser/Adafruit/SparkFun price check never completed; $175 at CanaKit/PiShop is the verified floor.</li>
+      <li><b>Relay board ground topology + boot-glitch behavior</b> — bench checks, not purchases (§8).</li>
+      <li><b>Software migration</b> — setup_adb_bridge.sh is a Zero 2 W idiom that fails on Pi 5; rig_monitor.py's single 10 Hz loop won't scale to ~25 channels; udev rules by USB serial before 3+ ttyUSB devices race. Details: docs/test-harness-review.md §5.6.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  Prices &amp; stock live-verified 2026-08-18 → 19 during an active DRAM-shortage price environment — re-check at checkout. Findings from three adversarial deep-research passes (326 agents; each claim survived a 3-vote refutation panel). Already owned and excluded: WT901 IMU (incline), Taiss E38S6-600-24G quadrature encoder (belt speed), tablet + adb bridge. Source doc: <code>docs/test-harness-parts.md</code>; design review: <code>docs/test-harness-review.md</code> (2026-08-20, applied here). In the TwinView repo.
+</footer>
+
+</div><!-- /wrap -->
+
+<script>
+const IMAGES = {
+  "canakit-pi5": "https://www.canakit.com/Media/700/2747.jpg",
+  "rpi-ssd-kit": "https://images.prismic.io/rpf-products/ZxI6C4F3NbkBXtPp_SSDKit256GB.jpg?auto=format%2Ccompress&fit=max",
+  "sequent-tc8": "https://sequentmicrosystems.com/cdn/shop/files/8-THERMO-V3-1_a969158a-8062-470d-9a71-af13ad7a42e8.jpg?v=1785548535&width=1160",
+  "mcc134": "https://cdn11.bigcommerce.com/s-7gavg/images/stencil/1280x1280/products/682/5829/MCC134-InUse2-1000__27353.1670980294.png?c=2",
+  "max31856": "https://cdn-shop.adafruit.com/970x728/3263-05.jpg",
+  "ina228": "https://cdn-shop.adafruit.com/970x728/5832-00.jpg",
+  "pzem004t": "https://m.media-amazon.com/images/I/61sNR2h9cvL._AC_SL1500_.jpg",
+  "shelly-em50": "https://us.shelly.com/cdn/shop/files/Shelly-Pro-EM-50-main-image_634c3c86-2db2-4672-a826-b846ce3ed4b9.png?v=1762463574",
+  "waveshare-canfd": "https://www.waveshare.com/media/catalog/product/cache/1/image/560x560/9df78eab33525d08d6e5fb8d27136e95/2/-/2-ch-can-fd-hat-1_4.jpg",
+  "pcan-usb-fd": "https://www.gridconnect.com/cdn/shop/files/PCAN-USB-FD_USB-A_USB-C.jpg?v=1784304421&width=1200",
+  "dsd-sh-u11f": "https://m.media-amazon.com/images/I/71KrA0uml5L._AC_SL1500_.jpg",
+  "waveshare-rs485": "https://www.waveshare.com/media/catalog/product/cache/1/image/560x560/9df78eab33525d08d6e5fb8d27136e95/u/s/usb-to-rs485-422-1.jpg",
+  "sparkfun-acs37800": "https://www.sparkfun.com/media/catalog/product/cache/f3020b7489dcfc4d1d147cf4dad07b7f/2/9/29259-Power-Meter-Feature.jpg",
+  "pololu-5410": "https://a.pololu-files.com/picture/0J13247.1200.jpg?7ba9875529b21c9f9f93ca5578ec28c7",
+  "protosupplies-relay": "https://protosupplies.com/wp-content/uploads/2018/02/Relay-Module-8-x-5V-1.jpg",
+  "adafruit-4409": "https://cdn-shop.adafruit.com/970x728/4409-06.jpg",
+  "pi-zero2w": "https://assets.raspberrypi.com/static/zero2-og-5fc305bc35b2d788912a57e520aebc42.png",
+  "wt901": "https://witmotion-sensor.com/cdn/shop/files/wt901c-485-9-axis-high-stability-accgyroangle-digital-compass-triaxial-mpu9250-sensor-1671728.jpg?v=1753843932&width=1000",
+  "taiss-encoder": "https://images-na.ssl-images-amazon.com/images/I/41%2BgKaf9L5L.jpg",
+  "mega2560": "https://store.arduino.cc/cdn/shop/files/A000067_00.front_1024x.jpg?v=1727098253",
+  "hx711": "https://www.sparkfun.com/media/catalog/product/cache/f3020b7489dcfc4d1d147cf4dad07b7f/1/3/13879-SparkFun_Load_Cell_Amplifier_-_HX711-01.jpg"
+};
+
+document.querySelectorAll('img[data-img]').forEach(img => {
+  const url = IMAGES[img.dataset.img];
+  if (url) {
+    img.src = url;
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    img.onerror = () => img.closest('.thumb').classList.add('noimg');
+  } else {
+    img.closest('.thumb').classList.add('noimg');
+  }
+});
+
+const pill = document.getElementById('totalPill');
+const tbody = document.querySelector('#buildTable tbody');
+function refresh() {
+  const rows = [];
+  let total = 0, n = 0;
+  document.querySelectorAll('input.sel:checked').forEach(cb => {
+    const p = parseFloat(cb.dataset.price);
+    total += p; n++;
+    rows.push(`<tr><td>${cb.dataset.name}</td><td class="r">$${p.toFixed(2)}</td></tr>`);
+  });
+  rows.push(`<tr><td>Total</td><td class="r">$${total.toFixed(2)}</td></tr>`);
+  tbody.innerHTML = rows.join('');
+  pill.innerHTML = `Build total: $${total.toFixed(2)} <small>(${n} item${n === 1 ? '' : 's'})</small>`;
+}
+document.querySelectorAll('input.sel').forEach(cb => cb.addEventListener('change', refresh));
+refresh();
+</script>
+</body>
+</html>
