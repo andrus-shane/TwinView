@@ -133,6 +133,18 @@ motor-controller speed feature: it publishes no belt speed of its own, so the Pi
 only measurement. The IF20 Renode instance hangs at PC 0x1d32a after each gateway restart until a
 `machine Reset` through its monitor (telnet 33338); the link then opens on the next retry.
 
+Full stop-to-stop run 2026-09-17 (10:05–14:30, 165 cycles, km/h, deck zeroed each cell) — the
+NTL17624/IF20 console's incline map, repeatable to ±0.05 % across all speeds: level 1 → 1.35 %
+deck grade, 2 → 2.92, 3 → 4.44, 4 → 5.86, 5 → 7.2, 6 → 8.42, **7/8/9 are snapped to 10 by the
+console**, 10 → 9.3 (the deck's physical top). The console refused 5 TARGET_GRADE writes (no
+echo, apparently while the deck was still moving) and afterwards reported CURRENT_GRADE 0 with
+the deck physically at 7.2 % — the worst "incline error" (7.2 %) is that console/deck state
+mismatch. Speed runs ~5 % fast at every cell (+0.18 km/h at 2 → +0.81 km/h at 16), crossing the
+0.5 mph tolerance at 15–16 km/h. Ramps clean: ~1.1 s per km/h to target, 6.2 s mean to zero,
+peak decel 3.1 mph/s (ASTM 6.0), no ramp timeouts. Step fixes that followed: deck wait targets
+the console's echoed grade (56 false timeouts before), refused grade writes retried once,
+`deck_moves` recorded per cycle; incline step default 1.0 (whole levels; 0.5 = native step).
+
 **Stop-to-stop over FP2** (`treadmill.fp2_accel_decel_matrix`, the twin of
 `treadmill.accel_decel_matrix`): per cell belt confirmed at rest (tach), deck returned to 0 %
 AND driven to the cell's incline (console CURRENT_GRADE confirms, fallback settle), TARGET_KPH
