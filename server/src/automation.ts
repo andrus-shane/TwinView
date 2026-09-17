@@ -15,8 +15,8 @@
  * resets to idle while the run itself finishes unharmed on its own.
  */
 
-import { spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 export interface AutomationConfig {
@@ -42,10 +42,19 @@ export interface AutomationRun {
   logPath: string;
   /** The runner's RESULT_JSON payload, when one was emitted */
   result?: unknown;
+  /** Runner process id — how a run is re-attached after a TwinView restart */
+  pid?: number;
+  /** Re-attached after a restart: the exit code is unknown, RESULT_JSON `passed` decides the status */
+  recovered?: boolean;
 }
 
 const LIST_TIMEOUT_MS = 90_000; // first import of tablet_automation takes seconds
 const RESULT_MARKER = 'RESULT_JSON: ';
+/** Active runs persisted next to their logs so a restarted server re-attaches them */
+const RUNS_FILE = 'active-runs.json';
+const RECOVER_POLL_MS = 5_000;
+/** An orphaned runner log older than this is history, not a run to re-attach */
+const ORPHAN_MAX_AGE_MS = 6 * 3600_000;
 
 /** Last RESULT_JSON payload in a runner log, or undefined. */
 function parseResultMarker(text: string): unknown {
@@ -80,10 +89,134 @@ export class AutomationBridge {
     this.repo = existsSync(join(candidate, 'tools', 'headless_runner.py')) ? candidate : null;
     const venvPython = this.repo ? join(this.repo, '.venv', 'Scripts', 'python.exe') : '';
     this.python = cfg?.python ?? (venvPython && existsSync(venvPython) ? venvPython : 'python');
+    if (this.repo) {
+      mkdirSync(this.logDir, { recursive: true });
+      this.restore();
+    }
   }
 
   available(): boolean {
     return this.repo !== null;
+  }
+
+  /** Is a process with this pid alive? Signal 0 is an existence probe (works on Windows too). */
+  private static alive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private save(): void {
+    const active = [...this.runs.values()].filter((r) => r.status === 'running' && r.pid);
+    try {
+      writeFileSync(join(this.logDir, RUNS_FILE), JSON.stringify(active, null, 2));
+    } catch {
+      /* best effort: recovery falls back to the orphan scan */
+    }
+  }
+
+  /** Pids of live headless_runner processes running this workflow (Windows only; empty elsewhere). */
+  private runnerPids(workflowId: string): number[] {
+    if (process.platform !== 'win32') return [];
+    const ps =
+      `Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ` +
+      `Where-Object { $_.CommandLine -like '*headless_runner.py*workflow*${workflowId}*' } | ` +
+      `Select-Object -ExpandProperty ProcessId`;
+    const r = spawnSync('powershell', ['-NoProfile', '-Command', ps], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    return (r.stdout ?? '')
+      .split(/\r?\n/)
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+  }
+
+  /**
+   * Re-attach runs that outlived a TwinView restart. Runners are detached on purpose (a
+   * restart must never orphan a moving belt), but a forgotten run leaves the twin thinking
+   * nobody is in charge: the unattended-motion watchdog alarms and the machine console's
+   * write gate lifts. Sources: the persisted active-runs file (pid known), and — for runs
+   * launched before persistence existed — the newest runner log per unit that has no
+   * RESULT_JSON yet, matched to a live headless_runner process for its workflow.
+   */
+  private restore(): void {
+    const seen = new Set<string>();
+    try {
+      const persisted = JSON.parse(readFileSync(join(this.logDir, RUNS_FILE), 'utf-8')) as AutomationRun[];
+      for (const r of persisted) {
+        if (!r.unitId || !r.pid) continue;
+        seen.add(r.unitId);
+        this.adopt({ ...r, status: 'running', recovered: true });
+      }
+    } catch {
+      /* no file yet */
+    }
+    let logs: string[] = [];
+    try {
+      logs = readdirSync(this.logDir).filter((f) => f.endsWith('.log'));
+    } catch {
+      return;
+    }
+    const newest = new Map<string, { file: string; mtime: number }>();
+    for (const file of logs) {
+      const unitId = file.split('_')[0];
+      if (!unitId || seen.has(unitId)) continue;
+      const mtime = statSync(join(this.logDir, file)).mtimeMs;
+      const cur = newest.get(unitId);
+      if (!cur || mtime > cur.mtime) newest.set(unitId, { file, mtime });
+    }
+    for (const [unitId, { file, mtime }] of newest) {
+      if (Date.now() - mtime > ORPHAN_MAX_AGE_MS) continue;
+      const logPath = join(this.logDir, file);
+      let text = '';
+      try {
+        text = readFileSync(logPath, 'utf-8');
+      } catch {
+        continue;
+      }
+      if (parseResultMarker(text) !== undefined) continue; // finished normally
+      const m = /^[^_]+_(.+)_\d{4}-\d{2}-\d{2}T[\d-]+Z\.log$/.exec(file);
+      const workflowId = m?.[1] ?? '';
+      const [pid] = workflowId ? this.runnerPids(workflowId) : [];
+      if (!pid) continue;
+      this.adopt({ workflowId, serial: 'host', unitId, startedAt: mtime, status: 'running', logPath, pid, recovered: true });
+    }
+    this.save();
+  }
+
+  /** Track a run this process did not spawn: poll its pid, finalize from the log when it exits. */
+  private adopt(run: AutomationRun): void {
+    if (!run.pid || !AutomationBridge.alive(run.pid)) {
+      this.finalizeFromLog(run);
+      this.runs.set(run.unitId, run);
+      return;
+    }
+    this.runs.set(run.unitId, run);
+    console.warn(`[automation] re-attached ${run.workflowId} on ${run.unitId} (pid ${run.pid}) after a restart`);
+    const timer = setInterval(() => {
+      if (AutomationBridge.alive(run.pid!)) return;
+      clearInterval(timer);
+      this.finalizeFromLog(run);
+      this.save();
+    }, RECOVER_POLL_MS);
+  }
+
+  /** No exit code for a re-attached run: the runner's RESULT_JSON `passed` decides. */
+  private finalizeFromLog(run: AutomationRun): void {
+    run.endedAt = Date.now();
+    try {
+      run.result = parseResultMarker(readFileSync(run.logPath, 'utf-8'));
+    } catch {
+      /* log unreadable */
+    }
+    const passed = (run.result as { passed?: boolean } | undefined)?.passed;
+    run.status = passed === true ? 'passed' : passed === false ? 'failed' : 'error';
+    run.exitCode = passed === true ? 0 : passed === false ? 1 : -1;
   }
 
   repoPath(): string | null {
@@ -209,6 +342,7 @@ export class AutomationBridge {
           stdio: ['ignore', logFd, logFd],
         },
       );
+      run.pid = child.pid;
       child.on('exit', (code) => {
         run.endedAt = Date.now();
         run.exitCode = code ?? -1;
@@ -218,17 +352,20 @@ export class AutomationBridge {
         } catch {
           /* log unreadable — keep exit-code status */
         }
+        this.save();
       });
       child.on('error', (err) => {
         run.endedAt = Date.now();
         run.status = 'error';
         run.result = { error: String(err) };
+        this.save();
       });
       child.unref();
     } finally {
       closeSync(logFd); // the child holds its own handle once spawned
     }
     this.runs.set(unitId, run);
+    this.save(); // a restarted server re-attaches this run by pid
     return run;
   }
 }

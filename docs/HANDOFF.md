@@ -315,9 +315,14 @@ server log (`[SAFETY] …` via console.error in main.ts). Deliberate choices:
 - A stale telemetry link does NOT clear an active alarm (dead transport over a moving
   belt was the incident); it clears only on a fresh reading < 0.3 mph or a controller
   taking over. Staleness alone never RAISES the alarm either.
-- Known blind spot: the automation bridge forgets detached runs across a TwinView
-  restart, so a restart under a healthy in-flight run alarms once the grace lapses —
-  false positive preferred over missing a genuinely orphaned belt.
+- Blind spot CLOSED 2026-09-17: the automation bridge used to forget detached runs across a
+  TwinView restart (the alarm fired and the machine console's write gate lifted under a healthy
+  run — happened live during the full stop-to-stop matrix). `AutomationBridge` now persists
+  active runs with their pid to `automation-logs/active-runs.json` and re-attaches them at
+  startup (`restore()`: pid probe via `process.kill(pid, 0)`, 5 s poll, status from the log's
+  RESULT_JSON `passed`). Runs launched before persistence existed are found by matching the
+  newest result-less runner log per unit to a live `headless_runner.py workflow <id>` process
+  (PowerShell Win32_Process scan). `AutomationRun.recovered` marks them.
 - The warn/fail tolerance logic is untouched; mock bays are exempt.
 
 ## Update 2026-08-20 — Pi 5 test-harness expansion (planning docs)
