@@ -116,7 +116,7 @@
         "Zylux_Airflow_Channel_EVA-PORT_Pad_4-1",
         "Zylux_Airflow_Channel_EVA-PORT_Pad_4-1_1"
       ],
-      "display": "solid"
+      "display": "xray"
     },
     {
       "name": "Console",
@@ -196,7 +196,7 @@
         "Copy_of_Charging_wires,_Ultra_3^1002916-1",
         "HDMI_&_USB-C_WIRES_ONYX_24_Display-1"
       ],
-      "display": "solid"
+      "display": "xray"
     },
     {
       "name": "Frame & structure",
@@ -530,7 +530,7 @@
         "Zylux_FR_SPKR_SPRT_HSG_RIGHT_P1101-0A10295-1",
         "go_no_go_145in-1"
       ],
-      "display": "solid"
+      "display": "xray"
     },
     {
       "name": "Hardware & electronics",
@@ -1449,7 +1449,7 @@
         "switch,_bluetooth_style-2",
         "switch,_bluetooth_style-3"
       ],
-      "display": "solid"
+      "display": "xray"
     }
   ]
 }

@@ -22,8 +22,10 @@ import type { Sample, TelemetrySource } from './types.js';
  *           "belt_speed": { "pattern": "^tach\\.mph: (-?\\d+(?:\\.\\d+)?)",     "unit": "mph" }
  *         } } ] } }
  *
- * Group 1 of `pattern` is the value; `scale` (default 1) multiplies it, and
- * `unit` labels what the channel receives AFTER scaling. The twin's incline
+ * Group 1 of `pattern` is the value; `scale` (default 1) multiplies it, `offset`
+ * (default 0) is then added — the tare for a sensor whose mount reads a bias at
+ * rest (the WT901 grade board sits ~+2.6 % on a flat deck) — and `unit` labels
+ * what the channel receives AFTER both. The twin's incline
  * channel is percent grade, NOT degrees of pitch — consume `incline.grade`
  * (100·tan(pitch), emitted by the Pi firmware), not `incline.pitch`. Address
  * Pis by their mDNS `.local` name rather than a DHCP IP.
@@ -41,6 +43,8 @@ import type { Sample, TelemetrySource } from './types.js';
 export interface NetChannelSpec {
   pattern: string;
   scale?: number;
+  /** Added after `scale`: the at-rest tare in channel units (e.g. -2.64 for a grade board reading +2.64 % flat) */
+  offset?: number;
   unit?: string;
 }
 
@@ -97,6 +101,7 @@ interface Matcher {
   channel: ChannelId;
   re: RegExp;
   scale: number;
+  offset: number;
 }
 
 /** Firmware source-timestamp suffix: " @<CLOCK_MONOTONIC ns>" at end of line. */
@@ -172,7 +177,12 @@ export class NetSource implements TelemetrySource {
     const matchers: Matcher[] = [];
     for (const [channel, spec] of Object.entries(ep.channels)) {
       if (!spec) continue;
-      matchers.push({ channel: channel as ChannelId, re: new RegExp(spec.pattern), scale: spec.scale ?? 1 });
+      matchers.push({
+        channel: channel as ChannelId,
+        re: new RegExp(spec.pattern),
+        scale: spec.scale ?? 1,
+        offset: spec.offset ?? 0,
+      });
     }
     const label = `${ep.host}:${ep.port}`;
     let sync = this.syncs.get(ep);
@@ -232,7 +242,7 @@ export class NetSource implements TelemetrySource {
     for (const m of matchers) {
       const hit = m.re.exec(line);
       if (hit?.[1] !== undefined) {
-        this.samples.set(m.channel, { t, tHost, value: parseFloat(hit[1]) * m.scale });
+        this.samples.set(m.channel, { t, tHost, value: parseFloat(hit[1]) * m.scale + m.offset });
         return m.channel;
       }
     }

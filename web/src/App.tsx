@@ -3,6 +3,7 @@ import { CHANNELS_BY_KIND } from '@twinview/shared';
 import { BindDialog } from './components/BindDialog';
 import { Breadcrumb } from './components/Breadcrumb';
 import { ComponentInspector } from './components/ComponentInspector';
+import { ConsoleKeys } from './components/ConsoleKeys';
 import { Controls } from './components/Controls';
 import { EventLog } from './components/EventLog';
 import { FleetPanel } from './components/FleetPanel';
@@ -16,6 +17,7 @@ import { ThemeMenu } from './components/ThemeMenu';
 import { AdbScreen } from './scene/adbScreen';
 import { FALLBACK_RIG } from './scene/fallback';
 import { MockConsole } from './scene/mockConsole';
+import { Pm210Lcd } from './scene/pm210Lcd';
 import { Viewer } from './scene/viewer';
 import { useStore, viewLevel } from './state/store';
 import { connectWs } from './state/ws';
@@ -224,12 +226,13 @@ export function App() {
       .catch(() => setScreens([]));
   useEffect(refreshScreens, []);
 
-  // Focusing a bay with a mapped tablet shows that tablet at full quality;
-  // unmapped bays fall back to the mock twin console.
+  // Focusing a bay with an emulated PM210 LCD shows that LCD; a mapped tablet
+  // shows at full quality; unmapped bays fall back to the mock twin console.
+  // (unit id inside the lcd source id so refocusing another LCD bay re-runs the source effect)
   useEffect(() => {
     if (!focusedUnitId) return;
     const unit = useStore.getState().units.find((u) => u.id === focusedUnitId);
-    setConsoleSource(unit?.screenSerial ?? 'mock');
+    setConsoleSource(unit?.console?.lcd ? `lcd:${unit.id}` : unit?.screenSerial ?? 'mock');
   }, [focusedUnitId]);
 
   // Lab wall: one low-spec stream per tablet-mapped bay. The focused unit is
@@ -277,6 +280,13 @@ export function App() {
       viewer.setConsoleCanvas(mock.canvas);
       return;
     }
+    if (consoleSource.startsWith('lcd:')) {
+      const lcd = new Pm210Lcd(consoleSource.slice(4));
+      lcd.connect();
+      host?.replaceChildren(lcd.canvas);
+      viewer.setConsoleCanvas(lcd.canvas);
+      return () => lcd.dispose();
+    }
     const live = new AdbScreen(consoleSource);
     liveScreenRef.current = live;
     live.connect();
@@ -295,7 +305,7 @@ export function App() {
   // Arm/disarm tap-through on the viewer and keep the mount-wired handler's
   // view current. Gated to unit level — that's where the toggle lives.
   useEffect(() => {
-    const armed = tapThrough && consoleSource !== 'mock' && level === 'unit';
+    const armed = tapThrough && consoleSource !== 'mock' && !consoleSource.startsWith('lcd:') && level === 'unit';
     tapRef.current = { armed, serial: consoleSource };
     viewerRef.current?.setScreenInteract(armed);
     return () => viewerRef.current?.setScreenInteract(false);
@@ -421,7 +431,7 @@ export function App() {
               <div className="card-title screen-title">
                 <span>Console Screen</span>
                 <span className="screen-src">
-                  {consoleSource !== 'mock' && (
+                  {consoleSource !== 'mock' && !consoleSource.startsWith('lcd:') && (
                     <label
                       className="tap-toggle"
                       title="Send clicks and drags on the screen (3D or here) as real taps and swipes to the tablet — this presses actual machine controls"
@@ -436,6 +446,13 @@ export function App() {
                   )}
                   <select value={consoleSource} onChange={(e) => setConsoleSource(e.target.value)}>
                     <option value="mock">Mock (twin)</option>
+                    {focusedUnit?.console?.lcd && (
+                      <option value={`lcd:${focusedUnit.id}`}>
+                        {focusedUnit.console.desk
+                          ? `${focusedUnit.console.desk} LCD (desk console for ${focusedUnit.console.link})`
+                          : `${focusedUnit.console.link} LCD (emulator)`}
+                      </option>
+                    )}
                     {screens.map((d) => (
                       <option key={d.serial} value={d.serial} title={d.hwSerial ? `${d.hwSerial} via ${d.serial}` : d.serial}>
                         {d.product || d.model || 'device'} · …{(d.hwSerial ?? d.serial).slice(-6)}
@@ -470,6 +487,8 @@ export function App() {
                 }}
                 onPointerCancel={() => (cardDragRef.current = null)}
               />
+              {/* outside .screen-host: the source effect's replaceChildren wipes the host's children */}
+              {consoleSource.startsWith('lcd:') && <ConsoleKeys unitId={consoleSource.slice(4)} />}
             </div>
             {CHANNELS_BY_KIND[focusedUnit?.kind ?? 'treadmill']
               // real bays track only their instrumented channels — no ghost

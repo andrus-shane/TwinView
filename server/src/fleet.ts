@@ -26,8 +26,10 @@ import { TwinEngine } from './twin.js';
 export interface RealBaySpec {
   kind: MachineKind;
   channels: ChannelId[];
-  sourceKind: 'serial' | 'net';
+  sourceKind: 'serial' | 'net' | 'fp2';
   makeSource(): TelemetrySource;
+  /** FP2 console bound to the bay, surfaced on UnitInfo */
+  console?: NonNullable<UnitInfo['console']>;
 }
 
 export interface FleetOptions {
@@ -83,14 +85,10 @@ export class Fleet {
 
   constructor(private opts: FleetOptions) {}
 
-  /** Real-hardware bay ids → declared kind (layout validation coerces to these). */
-  realKinds(): Map<string, MachineKind> {
-    return new Map([...(this.opts.real ?? [])].map(([id, spec]) => [id, spec.kind]));
-  }
-
   /**
    * Make the roster match the layout's occupied bays: new machines are built,
-   * emptied bays torn down, a kind change rebuilds the unit (new plant), and a
+   * emptied bays torn down, a kind change or a changed real-bay spec (source
+   * kind, console binding) rebuilds the unit (new plant/source), and a
    * model/label/order change just updates the roster. Returns true if anything
    * about the roster changed.
    */
@@ -104,7 +102,7 @@ export class Fleet {
     let changed = false;
     for (const u of [...this.unitList]) {
       const w = wanted.get(u.info.id);
-      if (!w || w.bay.machine!.kind !== u.info.kind) {
+      if (!w || w.bay.machine!.kind !== u.info.kind || this.specChanged(u)) {
         this.removeUnit(u.info.id, false);
         changed = true;
       }
@@ -117,10 +115,17 @@ export class Fleet {
         continue;
       }
       const m = bay.machine!;
-      if (u.info.model !== m.model || u.info.label !== bay.label || u.info.bay !== ordinal) {
+      if (
+        u.info.model !== m.model ||
+        u.info.label !== bay.label ||
+        u.info.bay !== ordinal ||
+        (u.info.units ?? 'mph') !== (bay.units ?? 'mph')
+      ) {
         u.info.model = m.model;
         u.info.label = bay.label;
         u.info.bay = ordinal;
+        u.info.units = bay.units;
+        u.engine.setSpeedUnit(bay.units ?? 'mph');
         changed = true;
       }
     }
@@ -129,6 +134,17 @@ export class Fleet {
       this.notifyFleet();
     }
     return changed;
+  }
+
+  /** The bay's real spec (or lack of one) no longer matches what the unit was built from. */
+  private specChanged(u: Unit): boolean {
+    const real = this.opts.real?.get(u.info.id);
+    const sourceKind = real ? real.sourceKind : 'mock';
+    return (
+      u.info.source !== sourceKind ||
+      (u.info.console?.link ?? null) !== (real?.console?.link ?? null) ||
+      (u.info.console?.desk ?? null) !== (real?.console?.desk ?? null)
+    );
   }
 
   private addUnit(bay: LabBay, ordinal: number): void {
@@ -146,9 +162,11 @@ export class Fleet {
         kind,
         source: real ? real.sourceKind : 'mock',
         auto: this.opts.autorun && !real,
+        ...(bay.units ? { units: bay.units } : {}),
       },
       nextRunAt: 0,
     };
+    if (real?.console) unit.info!.console = real.console;
     // The mock plant reads its own engine's setpoints — forward ref via closure
     const mock = real ? null : new MockSource(() => unit.engine!.setpoints, kind);
     unit.mock = mock;
@@ -160,6 +178,7 @@ export class Fleet {
       this.opts.channels?.[id] ?? real?.channels,
       real ? () => this.opts.automationRunning?.(id) ?? false : undefined,
     );
+    unit.engine.setSpeedUnit(bay.units ?? 'mph');
     unit.engine.onEvent((e) => {
       for (const fn of this.eventListeners) fn({ ...e, unitId: id });
     });

@@ -15,6 +15,15 @@
       "autoPort": true
     },
     {
+      "name": "fp2-gateway",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd /d C:\\Users\\shane.andrus\\Documents\\TabletAutoTest && .venv\\Scripts\\python.exe -m uvicorn services.fp2_gateway.app:app --host 127.0.0.1 --port 8102"
+      ],
+      "port": 8102
+    },
+    {
       "name": "docs-static-2",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8732", "--directory", "docs"],

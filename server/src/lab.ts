@@ -5,9 +5,11 @@ import {
   BAY_SIZE_MAX,
   BAY_SIZE_MIN,
   DEFAULT_MODEL_BY_KIND,
+  DEVICE_CODE_RE,
   MACHINE_KINDS,
   kindForModel,
   type LabBay,
+  type LabConsole,
   type LabLayout,
   type LabRow,
   type MachineKind,
@@ -27,6 +29,11 @@ export function baysInOrder(layout: LabLayout): LabBay[] {
   return layout.rows.flatMap((r) => r.bays);
 }
 
+/** Identity of a console binding — two bays may never share one (a console takes a single master). */
+export const consoleKey = (c: LabConsole): string => (c.kind === 'emulator' ? 'emulator' : `ble:${c.code}`);
+export const describeConsole = (c: LabConsole): string =>
+  c.kind === 'emulator' ? 'the PM210 emulator' : `BLE console ${c.code}`;
+
 export interface SeedOptions {
   size: number;
   rowers: number;
@@ -36,6 +43,8 @@ export interface SeedOptions {
   models?: Record<string, string>;
   /** Real-hardware bays keep the kind their sensor config declares */
   realKinds: Map<string, MachineKind>;
+  /** Bays pinned to an FP2 console in config (fleet.consoles keys); a console bay is a treadmill */
+  consoles?: Record<string, unknown>;
 }
 
 /**
@@ -47,7 +56,8 @@ export interface SeedOptions {
 export function seedLayout(opts: SeedOptions): LabLayout {
   const size = Math.max(1, Math.min(MAX_BAYS, Math.floor(opts.size)));
   const realIdx = new Set<number>();
-  for (const id of opts.realKinds.keys()) {
+  // real-hardware, console and model-pinned bays keep their kind: the specials go elsewhere
+  for (const id of [...opts.realKinds.keys(), ...Object.keys(opts.consoles ?? {}), ...Object.keys(opts.models ?? {})]) {
     const n = Number.parseInt(id.replace(/^u/, ''), 10);
     if (Number.isInteger(n) && n >= 1 && n <= size) realIdx.add(n - 1);
   }
@@ -69,12 +79,19 @@ export function seedLayout(opts: SeedOptions): LabLayout {
   const rows: LabRow[] = [];
   for (let i = 0; i < size; i++) {
     const id = bayIdFor(i + 1);
-    const kind = opts.realKinds.get(id) ?? kindAt.get(i) ?? 'treadmill';
+    // a pinned model fixes the kind (fleet.models treadmills never land on a rower slot); the
+    // console binding itself is derived from the placed model at run time, not stamped here
+    const model = opts.models?.[id];
+    const kind =
+      opts.realKinds.get(id) ??
+      (model ? kindForModel(model) : opts.consoles?.[id] ? 'treadmill' : undefined) ??
+      kindAt.get(i) ??
+      'treadmill';
     const bay: LabBay = {
       id,
       label: bayLabelFor(i + 1),
       ...BAY_SIZE_DEFAULT,
-      machine: { kind, model: opts.models?.[id] ?? DEFAULT_MODEL_BY_KIND[kind] },
+      machine: { kind, model: model ?? DEFAULT_MODEL_BY_KIND[kind] },
     };
     const r = Math.floor(i / cols);
     if (!rows[r]) rows[r] = { id: `r${r + 1}`, bays: [] };
@@ -101,6 +118,7 @@ export function normalizeLayout(
   const align = raw.align === 'left' ? 'left' : 'center';
   const bayIds = new Set<string>();
   const rowIds = new Set<string>();
+  const consoleOwners = new Map<string, string>(); // console key -> bay id
   const rows: LabRow[] = [];
   let count = 0;
   for (const r of raw.rows as Partial<LabRow>[]) {
@@ -133,6 +151,30 @@ export function normalizeLayout(
         if (!model) model = DEFAULT_MODEL_BY_KIND[kind];
         machine = { kind, model };
       }
+      // FP2 console binding: the emulator, or a BLE console by its device code.
+      // A console is a treadmill console and takes one master — no sharing.
+      let con: LabConsole | null = null;
+      const rawCon = (b as { console?: unknown }).console;
+      if (rawCon) {
+        const c = rawCon as { kind?: unknown; code?: unknown };
+        if (c.kind === 'emulator') {
+          con = { kind: 'emulator' };
+        } else if (c.kind === 'ble') {
+          const code = typeof c.code === 'string' ? c.code.trim().toUpperCase() : '';
+          if (!DEVICE_CODE_RE.test(code)) {
+            return { error: `${b.id}: a BLE device code is 2–8 letters or digits (as shown on the console)` };
+          }
+          con = { kind: 'ble', code };
+        } else {
+          return { error: `${b.id}: console kind must be "emulator" or "ble"` };
+        }
+        if (machine && machine.kind !== 'treadmill') {
+          return { error: `${b.id}: an FP2 console drives a treadmill, not a ${machine.kind}` };
+        }
+        const owner = consoleOwners.get(consoleKey(con));
+        if (owner) return { error: `${b.id}: ${describeConsole(con)} is already bound to ${owner}` };
+        consoleOwners.set(consoleKey(con), b.id);
+      }
       const width = Number(b.width);
       const depth = Number(b.depth);
       bays.push({
@@ -146,6 +188,9 @@ export function normalizeLayout(
           ? clamp(Math.round(depth * 100) / 100, BAY_SIZE_MIN.depth, BAY_SIZE_MAX.depth)
           : BAY_SIZE_DEFAULT.depth,
         machine,
+        ...(con ? { console: con } : {}),
+        // display unit of the machine's console/tablet (international unit); mph when absent
+        ...((b as { units?: unknown }).units === 'kph' ? { units: 'kph' as const } : {}),
       });
     }
     const row: LabRow = { id: rowId, bays };

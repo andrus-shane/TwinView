@@ -1,49 +1,58 @@
 {
   "version": 1,
-  "align": "center",
+  "align": "left",
   "rows": [
     {
       "id": "r1",
       "bays": [
         {
-          "id": "u01",
-          "label": "Bay 01",
+          "id": "u19",
+          "label": "Bay 1",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "treadmill",
-            "model": "NTL99925"
-          }
+          "machine": null
         },
         {
           "id": "u02",
           "label": "Bay 02",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "rower",
-            "model": "FMRW0826-1D30"
-          }
+          "machine": null
         },
         {
           "id": "u03",
           "label": "Bay 03",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "treadmill",
-            "model": "NTL17915"
-          }
+          "machine": null
         },
         {
           "id": "u04",
           "label": "Bay 04",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "rower",
-            "model": "FMRW0826-1D30"
-          }
+          "machine": null
+        },
+        {
+          "id": "u05",
+          "label": "Bay 05",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        },
+        {
+          "id": "u06",
+          "label": "Bay 06",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        },
+        {
+          "id": "u07",
+          "label": "Bay 07",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
         }
       ]
     },
@@ -51,69 +60,25 @@
       "id": "r2",
       "bays": [
         {
-          "id": "u05",
-          "label": "Bay 05",
-          "width": 2,
-          "depth": 3.4,
-          "machine": {
-            "kind": "treadmill",
-            "model": "NTL17624"
-          }
-        },
-        {
-          "id": "u06",
-          "label": "Bay 06",
-          "width": 2,
-          "depth": 3.4,
-          "machine": {
-            "kind": "elliptical",
-            "model": "NTEL71426"
-          }
-        },
-        {
-          "id": "u07",
-          "label": "Bay 07",
-          "width": 2,
-          "depth": 3.4,
-          "machine": {
-            "kind": "elliptical",
-            "model": "NTEL71426"
-          }
-        },
-        {
           "id": "u08",
           "label": "Bay 08",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "treadmill",
-            "model": "NTL99925"
-          }
-        }
-      ]
-    },
-    {
-      "id": "r3",
-      "bays": [
+          "machine": null
+        },
         {
           "id": "u09",
           "label": "Bay 09",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "pilates",
-            "model": "NTPL99926-6FW0"
-          }
+          "machine": null
         },
         {
           "id": "u10",
           "label": "Bay 10",
           "width": 2,
           "depth": 3.4,
-          "machine": {
-            "kind": "treadmill",
-            "model": "NTL99925"
-          }
+          "machine": null
         },
         {
           "id": "u11",
@@ -121,9 +86,10 @@
           "width": 2,
           "depth": 3.4,
           "machine": {
-            "kind": "pilates",
-            "model": "NTPL99926-6FW0"
-          }
+            "kind": "treadmill",
+            "model": "NTL17915"
+          },
+          "units": "kph"
         },
         {
           "id": "u12",
@@ -132,8 +98,75 @@
           "depth": 3.4,
           "machine": {
             "kind": "treadmill",
-            "model": "NTL99925"
+            "model": "NTL17624"
           }
+        },
+        {
+          "id": "u13",
+          "label": "Bay 13",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        }
+      ]
+    },
+    {
+      "id": "r3",
+      "bays": [
+        {
+          "id": "u14",
+          "label": "Bay 14",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        },
+        {
+          "id": "u15",
+          "label": "Bay 15",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        },
+        {
+          "id": "u16",
+          "label": "Bay 16",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        },
+        {
+          "id": "u17",
+          "label": "Bay 17",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        },
+        {
+          "id": "u18",
+          "label": "Bay 18",
+          "width": 2,
+          "depth": 3.4,
+          "machine": null
+        }
+      ]
+    },
+    {
+      "id": "r4",
+      "bays": [
+        {
+          "id": "u01",
+          "label": "Bay 01",
+          "width": 2,
+          "depth": 3.4,
+          "machine": {
+            "kind": "treadmill",
+            "model": "NTL17624"
+          },
+          "console": {
+            "kind": "ble",
+            "code": "1C5F"
+          },
+          "units": "kph"
         }
       ]
     }

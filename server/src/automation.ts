@@ -159,8 +159,17 @@ export class AutomationBridge {
     return this.runs.get(unitId) ?? null;
   }
 
-  /** Launch a workflow for a unit; one at a time per unit. */
-  run(unitId: string, workflowId: string, serial: string): AutomationRun | { error: string } {
+  /**
+   * Launch a workflow for a unit; one at a time per unit. `serial` is the bay's
+   * tablet, or `host` for device-less workflows (FP2 console tests). `extraEnv`
+   * carries per-bay context such as the console's gateway link.
+   */
+  run(
+    unitId: string,
+    workflowId: string,
+    serial: string,
+    extraEnv: Record<string, string> = {},
+  ): AutomationRun | { error: string } {
     if (!this.repo) return { error: 'TabletAutoTest repo not found' };
     if (!workflowId) return { error: 'workflowId is required' };
     const existing = this.runs.get(unitId);
@@ -193,6 +202,7 @@ export class AutomationBridge {
             // the matrix step pushes its live expected speed/incline back
             // to this unit's twin (best-effort; see treadmill.py)
             ...(this.baseUrl ? { TWINVIEW_URL: this.baseUrl, TWINVIEW_UNIT: unitId } : {}),
+            ...extraEnv,
           },
           windowsHide: true,
           detached: true, // survives a TwinView restart — never orphan a moving belt

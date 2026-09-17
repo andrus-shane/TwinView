@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react';
-import { FAULT_LABELS, FAULTS_BY_KIND, SETPOINT_META, type UnitInfo } from '@twinview/shared';
+import {
+  FAULT_LABELS,
+  FAULTS_BY_KIND,
+  KPH_PER_MPH,
+  SETPOINT_META,
+  SPEED_UNIT_LABEL,
+  type ConsoleStatus,
+  type UnitInfo,
+} from '@twinview/shared';
 import { useStore } from '../state/store';
 
 export function Controls() {
@@ -23,6 +31,12 @@ export function Controls() {
   const running = twin?.running ?? false;
   const speed = dragSpeed ?? twin?.setpoints.speed ?? 0;
   const incline = dragIncline ?? twin?.setpoints.incline ?? 0;
+  // An international treadmill displays km/h: the slider works in km/h for the operator while the
+  // twin's setpoint (and everything the server does) stays in mph.
+  const metric = kind === 'treadmill' && unit?.units === 'kph';
+  const sf = metric ? KPH_PER_MPH : 1;
+  const speedUnit = metric ? SPEED_UNIT_LABEL.kph : meta.speed.unit;
+  const speedStep = metric ? 0.5 : meta.speed.step;
 
   return (
     <div className="card">
@@ -54,7 +68,21 @@ export function Controls() {
             Stop
           </button>
         ) : (
-          <button className="btn primary" onClick={() => startScenario(scenarioId)} disabled={!scenarioId}>
+          <button
+            className="btn primary"
+            onClick={() => {
+              // an FP2-bound bay really commands the console — make the operator own that click
+              if (
+                unit?.console &&
+                !window.confirm(
+                  `Run ${scenarioId} on the FP2 console ${unit.console.link}?\nThe console receives WORKOUT_STATE and speed/incline targets.`,
+                )
+              )
+                return;
+              startScenario(scenarioId);
+            }}
+            disabled={!scenarioId}
+          >
             Run
           </button>
         )}
@@ -72,16 +100,16 @@ export function Controls() {
 
       <label className="slider-label">
         <span>
-          {meta.speed.label} setpoint <b>{speed.toFixed(meta.speed.step < 1 ? 1 : 0)} {meta.speed.unit}</b>
+          {meta.speed.label} setpoint <b>{(speed * sf).toFixed(speedStep < 1 ? 1 : 0)} {speedUnit}</b>
         </span>
         <input
           type="range"
-          min={meta.speed.min}
-          max={meta.speed.max}
-          step={meta.speed.step}
-          value={speed}
+          min={meta.speed.min * sf}
+          max={metric ? Math.round(meta.speed.max * sf) : meta.speed.max}
+          step={speedStep}
+          value={Math.round(speed * sf * 100) / 100}
           disabled={running}
-          onChange={(e) => setDragSpeed(parseFloat(e.target.value))}
+          onChange={(e) => setDragSpeed(parseFloat(e.target.value) / sf)}
           onPointerUp={() => {
             if (dragSpeed !== null) void setSetpoints({ speed: dragSpeed });
             setDragSpeed(null);
@@ -127,8 +155,83 @@ export function Controls() {
         </>
       )}
 
+      {unit?.console && <ConsoleSection unit={unit} status={twin?.console} />}
       {unit && unit.source !== 'mock' && <AutomationSection unit={unit} />}
     </div>
+  );
+}
+
+/** FP2 console status line — fed by TwinState.console at 10 Hz (Controls already re-renders per tick). */
+function ConsoleSection({ unit, status }: { unit: UnitInfo; status: ConsoleStatus | undefined }) {
+  // Pair = bond this PC with the BLE console through the gateway (once per host)
+  const [pairing, setPairing] = useState<'idle' | 'busy' | 'ok' | 'fail'>('idle');
+  const [pairMsg, setPairMsg] = useState<string | null>(null);
+  useEffect(() => {
+    setPairing('idle');
+    setPairMsg(null);
+  }, [unit.id]);
+  const pair = async () => {
+    setPairing('busy');
+    setPairMsg(
+      `pairing with ${unit.console?.ble}… if the link is mid-connect this waits for that attempt to fail first (up to ~2 min), then ~30 s to bond`,
+    );
+    try {
+      const r = await fetch(`/api/units/${unit.id}/console/pair`, { method: 'POST' });
+      const body = (await r.json().catch(() => ({}))) as { error?: string; device?: string; address?: string };
+      if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
+      setPairing('ok');
+      setPairMsg(`paired with ${body.device} (${body.address ?? '?'}) — link reconnects on its own`);
+    } catch (e) {
+      setPairing('fail');
+      setPairMsg(`pairing failed: ${(e as Error).message}`);
+    }
+  };
+
+  const ble = unit.console?.ble;
+  const link =
+    !status || status.link === 'connecting'
+      ? 'connecting…'
+      : status.link === 'up'
+        ? `up (${status.transport ?? '?'})`
+        : ble
+          ? 'down — gateway running? console paired with this PC?'
+          : 'down — is the FP2 gateway (:8102) running?';
+  const parts = [
+    link,
+    `workout ${status?.workoutLabel ?? '—'}`,
+    `console target ${
+      status?.targetMph == null
+        ? '—'
+        : unit.units === 'kph'
+          ? `${(status.targetMph * KPH_PER_MPH).toFixed(1)} km/h`
+          : `${status.targetMph} mph`
+    } / ${status?.targetGrade ?? '—'} %`,
+    `last key ${status?.lastKey ?? '—'}`,
+    `echo ${status?.lastEchoMs ?? '—'} ms`,
+  ];
+  return (
+    <>
+      <div className="card-title sub row-between">
+        <span>Console · FP2 {unit.console!.link}</span>
+        {ble && status?.link !== 'up' && (
+          <button
+            className="btn tiny"
+            disabled={pairing === 'busy'}
+            onClick={() => void pair()}
+            title={`Bond this PC with ${ble} (Windows Just Works pairing). Needed once per PC before the console answers FP2 over BLE.`}
+          >
+            {pairing === 'busy' ? 'Pairing…' : 'Pair'}
+          </button>
+        )}
+      </div>
+      <div className="auto-note fp2-status">{parts.join(' · ')}</div>
+      {unit.console?.desk && (
+        <div className="auto-note" title="The model's emulator stands in for the real panel: its LCD renders on the unit and its keys drive this machine">
+          desk console {unit.console.desk} · link {status?.deskLink ?? '—'} · keys on its panel drive this machine
+        </div>
+      )}
+      {pairMsg && <div className="auto-note">{pairMsg}</div>}
+    </>
   );
 }
 
@@ -162,10 +265,25 @@ function AutomationSection({ unit }: { unit: UnitInfo }) {
   const wfId = list.some((w) => w.id === pick) ? pick! : list[0]?.id ?? '';
   const wf = list.find((w) => w.id === wfId);
 
+  // a tablet runs the UI-driven workflows; an FP2 console runs the device-less ones (test.ble_console_*)
+  const consoleTarget = unit.console ? `FP2 console ${unit.console.link}` : null;
+  const target = wfId.startsWith('test.ble_console_') && consoleTarget
+    ? consoleTarget
+    : unit.screenSerial
+      ? `tablet ${unit.screenSerial}`
+      : consoleTarget;
+  // The belt/deck really moves, so the operator owns a second click. Inline rather than
+  // window.confirm: a browser that has muted this page's dialogs would swallow that silently.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => setArmed(false), [wfId, unit.id]);
   const launch = async () => {
     if (!wfId) return;
-    // the belt/deck really moves — make the operator own that click
-    if (!window.confirm(`Launch ${wfId} on tablet ${unit.screenSerial}?\nThe machine will move.`)) return;
+    if (!armed) {
+      setArmed(true);
+      setError(null);
+      return;
+    }
+    setArmed(false);
     setError(await runAutomation(wfId));
   };
 
@@ -175,10 +293,10 @@ function AutomationSection({ unit }: { unit: UnitInfo }) {
       {available === false && (
         <div className="auto-note">TabletAutoTest repo not reachable from the server.</div>
       )}
-      {available && !unit.screenSerial && (
-        <div className="auto-note">No tablet console assigned to this bay.</div>
+      {available && !target && (
+        <div className="auto-note">No tablet or FP2 console on this bay.</div>
       )}
-      {available && unit.screenSerial && (
+      {available && target && (
         <>
           <div className="row">
             <select
@@ -194,9 +312,19 @@ function AutomationSection({ unit }: { unit: UnitInfo }) {
                 </option>
               ))}
             </select>
-            <button className="btn primary" onClick={() => void launch()} disabled={running || !wfId}>
-              {running ? 'Running…' : 'Run'}
+            <button
+              className={`btn ${armed ? 'danger' : 'primary'}`}
+              onClick={() => void launch()}
+              disabled={running || !wfId}
+              title={armed ? `Launches ${wfId} on ${target}. The machine will move.` : undefined}
+            >
+              {running ? 'Running…' : armed ? 'Confirm — machine will move' : 'Run'}
             </button>
+            {armed && !running && (
+              <button className="btn" onClick={() => setArmed(false)}>
+                Cancel
+              </button>
+            )}
           </div>
           {run && (
             <div className="auto-note">

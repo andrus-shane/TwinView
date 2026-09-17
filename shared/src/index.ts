@@ -159,6 +159,23 @@ export interface TwinEvent {
   msg: string;
 }
 
+export interface ConsoleStatus {
+  /** Gateway WebSocket + FP2 link health */
+  link: 'connecting' | 'up' | 'down';
+  transport: string | null;
+  /** FP2 WORKOUT_STATE 0..6 and its name (none/ready/warmup/running/cooldown/paused/results) */
+  workoutState: number | null;
+  workoutLabel: string | null;
+  /** Console-side targets in twin units (mph, %) */
+  targetMph: number | null;
+  targetGrade: number | null;
+  lastKey: string | null;
+  /** Echo latency of the last FP2 write, ms; null before the first write */
+  lastEchoMs: number | null;
+  /** Link health of the bay's desk console (the model's emulator standing in for a real BLE panel) */
+  deskLink?: 'connecting' | 'up' | 'down';
+}
+
 export interface TwinState {
   /** Unix ms */
   t: number;
@@ -179,6 +196,8 @@ export interface TwinState {
    * true for as long as the condition holds, driving the web's red banner.
    */
   unattended?: boolean;
+  /** Live FP2 console status (bays with fleet.consoles); absent otherwise */
+  console?: ConsoleStatus;
 }
 
 /** Roles a 3D part can play in the twin visualization */
@@ -313,6 +332,25 @@ export interface LabMachine {
   model: string;
 }
 
+/**
+ * FP2 console bound to a bay: the Renode PM210 emulator, or a BLE console
+ * found by the device code printed on it (it advertises as iFIT_Tread_<CODE>).
+ */
+export type LabConsole = { kind: 'emulator' } | { kind: 'ble'; code: string };
+
+/**
+ * What the machine's console/tablet displays speed in. FP2 is km/h on the wire either way;
+ * test runs launched from the bay get it (FP2_SPEED_UNIT / TREADMILL_SPEED_UNIT) so matrices
+ * step in the unit the operator sees.
+ */
+export type SpeedUnit = 'mph' | 'kph';
+export const KPH_PER_MPH = 1.609344;
+/** Display label for a speed unit */
+export const SPEED_UNIT_LABEL: Record<SpeedUnit, string> = { mph: 'mph', kph: 'km/h' };
+
+/** BLE device code as shown on a console (e.g. 1CSF, DFAB); stored upper-case */
+export const DEVICE_CODE_RE = /^[A-Za-z0-9]{2,8}$/;
+
 /** One floor slot. `id` doubles as the unit id while the bay is occupied
  * (so hardware configs keyed "u01" keep pointing at the same slot). */
 export interface LabBay {
@@ -324,6 +362,10 @@ export interface LabBay {
   depth: number;
   /** null = empty bay */
   machine: LabMachine | null;
+  /** FP2 console commanding this bay (emulator, or BLE by device code); absent/null = none */
+  console?: LabConsole | null;
+  /** Speed unit the machine in this bay displays (international unit = kph); absent = mph */
+  units?: SpeedUnit;
 }
 
 export interface LabRow {
@@ -340,7 +382,7 @@ export interface LabLayout {
 }
 
 /** Real-hardware slots: bay id → the kind and source its sensor config declares. */
-export type LabRealBays = Record<string, { kind: MachineKind; source: 'serial' | 'net' }>;
+export type LabRealBays = Record<string, { kind: MachineKind; source: 'serial' | 'net' | 'fp2' }>;
 
 /** One unit under test on the lab floor */
 export interface UnitInfo {
@@ -351,11 +393,24 @@ export interface UnitInfo {
   serial: string;
   model: string;
   kind: MachineKind;
-  source: 'mock' | 'serial' | 'net';
+  source: 'mock' | 'serial' | 'net' | 'fp2';
   /** Autorun: unit cycles scenarios on its own until an operator takes over */
   auto: boolean;
+  /** Speed unit this machine displays (bay.units); the twin shows belt speed in it. Absent = mph */
+  units?: SpeedUnit;
   /** adb serial of the tablet console assigned to this bay (streams in lab + unit view) */
   screenSerial?: string;
+  /**
+   * FP2 console bound to this bay: gateway link name, whether an LCD proxy exists, and for a
+   * BLE console its advertised name (the Console card offers Pair — an unbonded host gets no FP2 replies)
+   */
+  console?: {
+    link: string;
+    lcd: boolean;
+    ble?: string;
+    /** Emulator link acting as this bay's DESK console: its LCD shows on the unit, its keys drive the real machine */
+    desk?: string;
+  };
 }
 
 /** A twin event tagged with the unit it came from (lab-wide detections feed) */

@@ -25,7 +25,7 @@ export interface Sample {
  * model; the serial source (later) reads the same channels from USB sensors.
  */
 export interface TelemetrySource {
-  readonly kind: 'mock' | 'serial' | 'net';
+  readonly kind: 'mock' | 'serial' | 'net' | 'fp2';
   start(): Promise<void>;
   stop(): Promise<void>;
   /** Latest measured sample for a channel, or null if none yet (stale). */

@@ -3,13 +3,15 @@
     "kind": "treadmill",
     "endpoints": [
       {
-        "host": "127.0.0.1",
+        "host": "testingraspberryzero2.local",
         "port": 5000,
-        "_note": "Pi is 192.168.1.134 (testingraspberryzero2.local) on the isolated bench Wi-Fi; 127.0.0.1:5000 is an adb tunnel through tablet SZ00000141 (adb forward tcp:5000 tcp:15000 + nc relay). Use the .local name directly once this box can reach the bench subnet.",
+        "_note": "Pi Zero 2 W rig-monitor (WT901 incline + quadrature tach) on the Bay 01 treadmill (NTL17624, BLE console iFIT_Tread_1C5F bound in lab.json) since 2026-09-16 (previously the NTL17915 bay u03). Reach the Pi directly by its mDNS name on the lab Wi-Fi (192.168.1.134). With this source owning belt_speed + incline, the bay's FP2 console attaches commander-only (setpoints out, events in) and the Pi's tach arms the unattended-motion watchdog.",
         "channels": {
           "incline": {
             "pattern": "^incline\\.grade: (-?\\d+(?:\\.\\d+)?)",
             "scale": 1.0,
+            "offset": -2.64,
+            "_offset_note": "Tare: the WT901 grade board read +2.64 % with the NTL17624 deck at 0 % (console CURRENT_GRADE 0) on 2026-09-16. Re-tare after remounting: set offset 0, read the at-rest incline, put its negative here, restart the server.",
             "unit": "%"
           },
           "belt_speed": {

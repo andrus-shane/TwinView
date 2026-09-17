@@ -3,6 +3,7 @@ import {
   BAY_SIZE_DEFAULT,
   BAY_SIZE_MAX,
   BAY_SIZE_MIN,
+  DEVICE_CODE_RE,
   KIND_LABELS,
   MACHINE_KINDS,
   type LabBay,
@@ -316,7 +317,7 @@ export function LabEditor() {
 
 interface BayDetailProps {
   bay: LabBay;
-  real?: { kind: MachineKind; source: 'serial' | 'net' };
+  real?: { kind: MachineKind; source: 'serial' | 'net' | 'fp2' };
   models: { model: string; kind: MachineKind; glbUrl: string | null }[];
   hasUnit: boolean;
   onChange(patch: Partial<LabBay>): void;
@@ -335,6 +336,28 @@ function BayDetail({ bay, real, models, hasUnit, onChange, onMove, onRemove, onO
     setWidth(fmt(bay.width));
     setDepth(fmt(bay.depth));
   }, [bay.id, bay.label, bay.width, bay.depth]);
+
+  // Console binding: the kind commits at once; a BLE console commits once its device code is typed
+  const bayConsoleKind = bay.console?.kind ?? '';
+  const bayCode = bay.console?.kind === 'ble' ? bay.console.code : '';
+  const [consoleKind, setConsoleKind] = useState<'' | 'emulator' | 'ble'>(bayConsoleKind);
+  const [code, setCode] = useState(bayCode);
+  const [codeError, setCodeError] = useState<string | null>(null);
+  useEffect(() => {
+    setConsoleKind(bayConsoleKind);
+    setCode(bayCode);
+    setCodeError(null);
+  }, [bay.id, bayConsoleKind, bayCode]);
+  const commitCode = () => {
+    const v = code.trim().toUpperCase();
+    if (!v) return; // nothing typed yet: leave the field open
+    if (!DEVICE_CODE_RE.test(v)) {
+      setCodeError('A device code is 2–8 letters or digits, as printed on the console.');
+      return;
+    }
+    setCodeError(null);
+    if (v !== bayCode) onChange({ console: { kind: 'ble', code: v } });
+  };
 
   const commitLabel = () => {
     const v = label.trim();
@@ -370,6 +393,7 @@ function BayDetail({ bay, real, models, hasUnit, onChange, onMove, onRemove, onO
         <span>
           {bay.id}
           {real ? ` · real hardware (${real.source})` : ''}
+          {bay.console ? ` · ${bay.console.kind === 'emulator' ? 'emulator console' : `BLE ${bay.console.code}`}` : ''}
         </span>
         {hasUnit && (
           <button className="btn tiny" onClick={onOpen} title="Fly into this unit">
@@ -422,6 +446,69 @@ function BayDetail({ bay, real, models, hasUnit, onChange, onMove, onRemove, onO
           })}
         </select>
       </label>
+
+      {bay.machine && (
+        <label
+          className="check"
+          title="International unit: its console or tablet displays km/h. Test runs launched from this bay work in that unit (matrices step in whole km/h). FP2 stays km/h on the wire either way."
+        >
+          <input
+            type="checkbox"
+            checked={bay.units === 'kph'}
+            onChange={(e) => onChange({ units: e.target.checked ? 'kph' : undefined })}
+          />
+          Displays km/h (international unit)
+        </label>
+      )}
+
+      {(!bay.machine || bay.machine.kind === 'treadmill') && (
+        <div className="field">
+          <span>Console</span>
+          <select
+            value={consoleKind}
+            onChange={(e) => {
+              const kind = e.target.value as '' | 'emulator' | 'ble';
+              setConsoleKind(kind);
+              setCodeError(null);
+              if (kind === 'emulator') onChange({ console: { kind: 'emulator' } });
+              else if (kind === '' && bay.console) onChange({ console: null });
+              // 'ble' commits once a device code is entered
+            }}
+            title="FP2 console this bay commands through the TabletAutoTest FP2 gateway (:8102)"
+          >
+            <option value="">— none —</option>
+            <option value="emulator">Emulator (Renode PM210)</option>
+            <option value="ble">BLE console (by device code)</option>
+          </select>
+          {consoleKind === 'ble' && (
+            <label className="field">
+              <span>Device code (shown on the console)</span>
+              <input
+                type="text"
+                value={code}
+                placeholder="e.g. 1CSF"
+                maxLength={8}
+                autoFocus={!bayCode}
+                spellCheck={false}
+                onChange={(e) => setCode(e.target.value.toUpperCase())}
+                onBlur={commitCode}
+                onKeyDown={onEnter(() => {
+                  setCode(bayCode);
+                  setCodeError(null);
+                })}
+              />
+              {codeError && <div className="lab-error">{codeError}</div>}
+            </label>
+          )}
+          <div className="lab-hint">
+            {consoleKind === 'ble'
+              ? `Pairs over BLE to the console advertising code ${code || '…'}. Needs the FP2 gateway running; link status shows in the unit's Console card.`
+              : consoleKind === 'emulator'
+                ? 'Needs the FP2 gateway and Renode running; the PM210 LCD renders in the unit view.'
+                : 'Bind the Renode emulator or a real console so scenarios drive it over FP2.'}
+          </div>
+        </div>
+      )}
 
       <div className="field">
         <span>Footprint (m)</span>

@@ -240,6 +240,12 @@ select, input[type='text'], .field input {
 .screen-src .btn { padding: 2px 7px; font-size: 12px; }
 .screen-src .tap-toggle { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .screen-host.tap-armed canvas { cursor: crosshair; }
+.console-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+.console-keys h5 { margin: 0 0 3px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.console-keys .col { display: flex; flex-direction: column; gap: 3px; }
+.console-keys .btn { font-size: 11px; padding: 3px 4px; }
+.console-keys .auto-note { grid-column: 1 / -1; }
+.fp2-status { font-variant-numeric: tabular-nums; }
 
 /* Event log */
 .eventlog { height: 168px; display: flex; flex-direction: column; }

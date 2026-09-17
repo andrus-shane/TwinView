@@ -18,6 +18,281 @@ Repo: https://github.com/andrus-shane/TwinView (private) — this directory is a
 - Frontend: procedural placeholder treadmill (`web/src/scene/fallback.ts`) with pre-bound rig; click part → bind channels/roles (persists to `models/rig.json` via PUT /api/rig); deck tilts to measured incline (ghost wireframe = commanded, 2× visual exaggeration); belt texture scrolls at measured speed; parts tint amber/red on deviation; mock console canvas is textured onto the 3D console screen; uPlot cmd-vs-meas sparklines per channel.
 - Everything verified end-to-end: scenario run, fault injection → FAIL event → clear → recovery, slider setpoints, bind/save/remove, rig persistence.
 
+## Update 2026-09-16 (latest) — consoles bound per bay in the floor editor (device codes)
+
+FP2 console bindings moved out of `config.json` into the lab layout: `bay.console` in
+`lab.json` is `{ "kind": "emulator" }` (Renode PM210) or `{ "kind": "ble", "code": "1CSF" }`
+(a real console, found by the device code printed on it — it advertises as
+`iFIT_Tread_<CODE>`). Edited from the floor editor's bay card (**Console** select + device
+code field), applied live: `syncConsoles()` in main.ts rebuilds `realBays` from the layout on
+every commit and `Fleet.applyLayout` now also rebuilds a unit whose source kind or console
+link changed (`specChanged`). `config.fleet.consoles` only seeds the default grid
+(`'emulator'` or a device code) on a fresh install / Reset.
+
+Gateway side: a BLE console outside the static catalog is registered by TwinView at connect
+time with the new `PUT /v1/links/<name>` (TabletAutoTest `services/fp2_gateway/app.py`,
+in-memory catalog entry `{transport:'ble', device_name:'iFIT_Tread_1CSF', ...}`; link name
+`ble-1csf`). Idempotent, so a gateway restart relearns it on TwinView's next 3 s retry. A
+gateway that predates the endpoint answers 405 — the twin logs one warn event saying so.
+Rules enforced by `normalizeLayout`: a console bay is a treadmill; one console per bay and one
+bay per console (the emulator, or a given code). Config knobs: `fp2EmulatorLcd`
+(default `http://127.0.0.1:8889`) and `fp2BleNamePrefix` (default `iFIT_Tread_`).
+
+Pairing (found on the NTL17624, code **1C5F** — digit five; the console is `iFIT_Tread_1C5F`):
+an unbonded Windows host gets a GATT connection but the FP2 characteristics never answer
+(gateway: "pre-warm 3 attempt(s)" then "FP2 setup over ble failed: failed to fetch supported
+features"). The hosts that work (`iFIT_Tread_DFAB`, `_B39F`) are in Windows' paired-device
+list; 1C5F was not. So: the unit view's Console card shows **Pair** for a BLE console while
+its link is down → `POST /api/units/:id/console/pair` → gateway `POST /v1/ble/pair
+{device_name, link}` (bleak `pair()`, Just Works, closes + locks the link meanwhile). Once
+per PC; the link then opens on TwinView's next 3 s retry. Also fixed: `Fp2Console` now logs
+the gateway's WS close reason (4404/4503) as a warn event, once per distinct reason. Gotcha
+hit today: start the gateway with the repo venv (`.venv\Scripts\python.exe -m uvicorn …`),
+the system `python` has no `fp2_utils` and every open fails with that message.
+
+Sensors: the Pi rig-monitor (grade board + tach) moved to the Bay 01 NTL17624 — `network_sensors.json`
+keys it to `u01`, so the bay is `source: net` and the BLE console attaches commander-only (watchdog
+armed by the tach). `NetChannelSpec` gained `offset` (added after `scale`): the WT901 board reads
++2.64 % on a flat deck, so incline carries `"offset": -2.64` (re-tare procedure in the file's note).
+TabletAutoTest `config/treadmill_sensors.json` now points straight at `tcp://testingraspberryzero2.local:5000`
+(the adb relay is gone); the rig serves several clients, so TwinView and a workflow read it together.
+
+**FP2-commanded speed/incline matrix** (TabletAutoTest): `treadmill.fp2_speed_incline_matrix` +
+`fp2_console_check` + `fp2_stop_belt` in `steps/builtin/fp2_matrix.py` command the console board
+over FitPro2 THROUGH the FP2 gateway (`POST /v1/links/<link>/write`, 5 Hz `GET` poll) — the same
+link TwinView holds, never a second BLE central. Workflows `test.ble_console_speed_incline_matrix`
+(auto cross-product from the console's MAX_KPH_LIMIT / MAX_GRADE, 1 mph × 3 % steps) and
+`test.ble_console_speed_incline_quick` (5 gentle cells, ~4 min — run it first). Device-less
+(serial `host`); expected = the console's accepted TARGET_* (basis `console`), measured = host
+sensors when they open else the console's CURRENT_* (per-cell `*_measured_basis`); same judging,
+artifact schema and `report.treadmill_tracking_pdf` as the rail-tap matrix; the belt is stopped over
+FP2 in the step's `finally` AND by the wrap-up/failure `fp2_stop_belt` node. TwinView launches it
+from the unit's Automation card on a console-bound bay: `/api/units/:id/automation/run` passes
+`FP2_GATEWAY_URL` / `FP2_GATEWAY_LINK` and serial `host` when the bay has no tablet.
+
+**Desk console** (a BLE-bound bay borrows the model's emulator): a real panel cannot be rendered,
+so `syncConsoles` pairs the bay's machine console (`ble-1c5f`) with `DEFAULT_CONSOLE_BY_MODEL[model]`
+(NTL17624 → `if20`) as a second `Fp2Console` in role `'desk'`: its Renode LCD is what the unit shows
+(`entry.lcd` → the LCD proxy, `UnitInfo.console.desk`, `ConsoleStatus.deskLink`), its membrane keys
+(`ConsoleKeys` → `/lcd/press` → emulator) become console-origin TARGET_*/WORKOUT_STATE changes that
+fold into the twin and go out to the machine through the machine console's push. The other way the
+desk follows the machine: targets via the twin (only while its own workout is active — the board
+rejects targets when idle), START/STOP mirrored directly (`peer.requestWorkoutState`, written first in
+`push`). Desk role: never adopts the emulator's boot-time {0,0} at hello (forces a mirror write with
+`-Infinity` lastSent instead), feeds no telemetry, keeps mirroring during automation runs. Explicit
+layout bindings claim links before model defaults, so Bay 01's desk wins `if20` over the mock
+NTL17624 bays. Blocker seen 2026-09-16: the IF20 Renode instance (TCP 3460 / panel 8892) was frozen
+(`/frame` counter static at 1056) → `fp2 open if20 failed: failed to fetch supported features`; the
+PM210/IF17 instances were fine. Restart that Renode instance; the gateway reconnects on its own.
+(It came back later the same afternoon; desk link `up`.)
+
+Echo handling (fp2.ts): the gateway tags EVERY relayed write as `origin: 'echo'`, ours or another
+client's (the FP2 matrix run). `Fp2Console` now remembers its own in-flight writes (`ownWrites`,
+6 s) and folds any other echo in like a console-origin change — so during an automation run the
+twin's targets follow what the console accepted and the desk console mirrors the run live
+(machine console still never writes while a run is active). Before this the desk sat dark
+during runs.
+
+First live results (Bay 01 NTL17624, 2026-09-16): quick matrix — speed within tolerance but
++0.15..0.24 mph high at every cell; incline console 3 % → deck 4.4 %, 6 % → 8.4 %, and the
+console snapped a TARGET_GRADE 9 to 10 (IF20 quantizes). Full matrix (45 cells, 25 min) — speed
++0.13..0.41 mph high 1–9 mph; incline data INVALID: the WT901 grade stream froze for whole 20 s
+windows (203 identical samples) and jumped by many percent between blocks, at-rest reading
+wandered 2.3 → 6.0 %. Sensor/mount/wiring fault on the rig, not the machine (Shane: the board fell
+off and was remounted backwards). The FP2 matrix step now drops bit-identical windows
+(`frozen_sensor_cells`) instead of judging them.
+
+Rerun with the board remounted (17:18, 45 cells): rock-steady and repeatable to ±0.02 % across all
+speeds — console 3 % → 4.40 % grade, 6 % → 8.40 %, 9 (snapped to 10 by the IF20) → 9.26 %,
+10 % → 9.26 % (physical top). That is the NTL17624's incline calibration, not the rig. Speed error
+grows with speed: +0.18 mph at 1–2 mph → +0.43 mph at 9 mph (~5 % fast), still inside ±0.5.
+One 20 s window came back bit-identical and was dropped by the frozen guard (console fallback).
+
+Also learned: this console reports CURRENT_KPH = 0 over FP2 while the belt runs (like the desk
+console), so the step no longer refines the twin from CURRENT_*; it pushes the console's ACCEPTED
+targets instead, and a zero current speed against a non-zero command is recorded as "not
+reported". Desk-emulator guard (fp2.ts): the IF20 firmware changes its own targets (zeroes them
+when its workout ends), so desk-origin TARGET changes steer the machine only within 3 s of a
+membrane key edge and never during an automation run; otherwise ignored and re-mirrored.
+International consoles: `bay.units = 'kph'` ("Displays km/h (international unit)" in the bay
+card, on the BAY so tablet bays have it too) → every run from the bay gets `FP2_SPEED_UNIT` +
+`TREADMILL_SPEED_UNIT` = kph → the FP2 matrices step in whole km/h (`speed_kph` per segment,
+km/h companions in the records; the quick variants have km/h cell sets). TwinView presentation
+follows too: `UnitInfo.units`, `TwinEngine.setSpeedUnit()` converts belt_speed in `getState()`
+(values, tolerances, unit label), deviation/watchdog events and `formatSpeed()` for the FP2
+event text; the Controls slider and console line work in km/h. Internals (setpoints, FP2, plant)
+stay mph. The rail-tap tablet matrix does not read the flag yet.
+
+Gateway (2026-09-17): now launchable from TwinView's `.claude/launch.json` as `fp2-gateway`
+(cmd → TabletAutoTest venv uvicorn), so Claude Code can restart it and read its logs; the old
+Administrator-cmd instance could not be killed from a normal shell (access denied). Subscriptions
+added: `DRV_MTR_CURRENT_SPEED`, `DRV_MTR_TARG_SPEED`, `RC_CURRENT_SPEED`, `RC_TARGET_SPEED`,
+`HDRV_SPEED_LPF`, `DISPLAY_UNITS`. The NTL17624/IF20 board accepted ONLY `DISPLAY_UNITS` (=1,
+metric — confirms the km/h console; TwinView could auto-detect from it later) and pruned every
+motor-controller speed feature: it publishes no belt speed of its own, so the Pi tach stays the
+only measurement. The IF20 Renode instance hangs at PC 0x1d32a after each gateway restart until a
+`machine Reset` through its monitor (telnet 33338); the link then opens on the next retry.
+
+**Stop-to-stop over FP2** (`treadmill.fp2_accel_decel_matrix`, the twin of
+`treadmill.accel_decel_matrix`): per cell belt confirmed at rest (tach), deck returned to 0 %
+AND driven to the cell's incline (console CURRENT_GRADE confirms, fallback settle), TARGET_KPH
+written (tach confirms), hold 10 s judged like the steady matrix, TARGET_KPH=0 (tach confirms);
+`_ramp_stats` accel/decel, ASTM decel gate, cycle_faults = accel/decel timeouts + rejected
+commands. `zero_incline_between` (default true — Shane's ask: expose cells that only track
+because the previous one left the deck there) doubles deck travel: ~2 min per 10 % cell.
+Workflows `test.ble_console_accel_decel_matrix` (auto-range) and `_quick` (4 cycles, ~6 min).
+Measurement code shared with the steady step via `_measure_window()`.
+
+## Update 2026-09-16 — Pi rig-monitor moved to the BLE-console bay (u03)
+
+The Zero 2 W sensor hub left bay 1 (tablet console, adb relay through SZ00000141) for the
+NTL17915 / `iFIT_Tread_DFAB` bay. No tablet there, so there is no adb passthrough of any
+kind any more: `network_sensors.json` now keys the Pi to `u03` by
+`testingraspberryzero2.local`, `u01` is a mock bay again, and the Pi's
+`adb-server`/`adb-bridge` units are disabled. With the Pi owning `belt_speed` on u03 the
+FP2 console attaches commander-only (main.ts warns at boot) and the unattended-motion
+watchdog is armed there again (see the 2026-09-16 FP2 section above for why FP2 alone
+could not do that).
+
+Networking: the dev laptop must be on lab Wi-Fi `OS Testing` (192.168.1.0/24, the SAME
+LAN as the old "isolated bench Wi-Fi") — corporate `iconwireless` has no route. The Pi's
+SD card gained `OS Testing` (WPA3/SAE) next to `ifit`, instance-id bumped to
+`rig-20260916-ostesting`; the Pi kept 192.168.1.134. Verified live: rig-monitor active,
+0 restarts, tach_quad child up, 10 channels at 10 Hz reaching the laptop, `/api/units/u03/state`
+fed by `source: net`. Tooling: `pi-rig-monitor/check_pi.sh` (plink needs `-batch -hostkey`;
+PuTTY's host-key prompt goes to the console and hangs scripts otherwise). Pi MAC OUI is
+`88:A2:9E` (Raspberry Pi Trading) — sweeps that only know the older Pi OUIs miss it.
+
+Open: incline on the NTL17915 reads ≈ +2.6 % at rest — the WT901 mount differs from bay 1
+and `PITCH_RAW_LEVEL` (-0.68°) is bay-1's bubble-level calibration; u03 incline sits in
+FAIL until re-leveled on this unit (and `net.ts` has `scale` but no `offset` field, so a
+console-units tare would need either a Pi-side constant or a small NetChannelSpec addition).
+Also noticed: the boot partition holds ~10 MB of oddly named files (`XORXOR…`, `ZZZZZ…`,
+`DsTpX…`, `!!!!!…`, Aug 11–Sep 14) of unknown origin — left in place.
+
+## Update 2026-09-16 — FP2 consoles (emulator + BLE) via the TabletAutoTest FP2 gateway
+
+A bay can now be bound to a FitPro2 console — the Renode PM210 emulator or the
+physical BLE desk console — and TwinView commands it over FP2 instead of UI taps.
+TypeScript never speaks FP2: the TabletAutoTest **FP2 gateway** (FastAPI,
+`services/fp2_gateway`, 127.0.0.1:8102) is the single FP2 master on the host and
+decodes features/keys into labels. It must be running:
+`python -m uvicorn services.fp2_gateway.app:app --host 127.0.0.1 --port 8102` from the
+TabletAutoTest checkout (or `python run_services.py`, which registers it). Links open
+lazily on first use, so the gateway itself binds instantly even for BLE.
+
+Config (`config.json`, restart the server after editing — `tsx watch` ignores it):
+- `fp2Gateway`: gateway base URL, default `http://127.0.0.1:8102`.
+- `fleet.consoles`: unit id -> gateway link name (`"u03": "dfab"`) or
+  `{ "link": "emulator", "lcd": "http://127.0.0.1:8889" }` when the console is the emulator
+  and its HTTP panel should be proxied for the LCD card. Link names are the gateway's
+  catalog (`config/fp2_consoles.json` in TabletAutoTest): `emulator` = Renode simuart,
+  `dfab` = BLE desk console. Config-only switch between them.
+- `TWINVIEW_CONFIG=<path>` env var points a run at an alternate config file (absolute or
+  relative to the repo root) — used by the verify runs.
+- A console bay must NOT also list `belt_speed` in `fleet.channels` (that override beats the
+  source's declared channels and the gauge would sit permanently stale).
+
+Wiring (`server/src/fp2.ts`, `Fp2Console implements TelemetrySource`, kind `'fp2'`):
+- Registered into `realSources` like serial/net, so Fleet makes the bay real with no
+  fleet.ts change (no autorun, no seeded faults, `auto:false`). If serial/net already own
+  the bay the console attaches commander-only (warned at boot): setpoints out, events in,
+  no channels.
+- Outbound: subscribes to the previously unused `engine.onState` (fires at the end of every
+  100 ms tick, after scenario playback has replaced `engine.setpoints`, so operator API,
+  playback, stop and complete are all seen). Deadband 0.05 vs the last value sent, mph ->
+  `TARGET_KPH` (x1.609344), `%` -> `TARGET_GRADE`, clamped to the console's
+  `MAX_KPH_LIMIT`/`MAX_GRADE` with a warn event. `running` false->true writes
+  `WORKOUT_STATE=3`, true->false writes `5` (pause). Every write is `POST
+  /v1/links/<link>/write` and its echo lands as a twin event (`echoed in N ms`, `unchanged`,
+  `not echoed in 2 s`, or `console clamped`). Writes are skipped while an automation run is
+  active on the bay (never two masters).
+- Inbound: the gateway WS `/ws/links/<link>` streams 10 Hz ticks. `CURRENT_GRADE` becomes the
+  `incline` sample (refreshed every tick while the link is up, so a dead link goes stale
+  within 1.5 s). Console-origin `TARGET_*` changes fold back with `engine.setSetpoints` (a
+  human pressing console keys moves the twin's sliders), `WORKOUT_STATE`/`KEY_COOKED` become
+  info events with the gateway's labels, `SYSTEM_ERROR != 0` a warn.
+- On hello the console's own targets are adopted (the machine is the source of truth at
+  connect — a server restart never writes the boot-time `{0,0}` over a running belt).
+- Status rides the existing 10 Hz `states` batch and `/api/units/:id/state` as
+  `TwinState.console` (`ConsoleStatus`: link up/down, transport, workout state + label, target
+  mph/grade, last key, last echo ms); `UnitInfo.console = { link, lcd }` says a bay is bound.
+
+LCD proxy (`server/src/pm210.ts`), emulator bays only, keyed by unit id:
+`GET /api/units/:id/lcd/panelmap` (memoized, static geometry), `GET .../lcd/frame`
+(`{frame, ..., ram}` — a lit element is `ram[a] & m` against the 660-byte hex RAM),
+`POST .../lcd/press {index 0..4, mask 0..255}` (down / 150 ms / up, release in `finally`:
+held masks latch on the emulator until an explicit release). 503 `no LCD bound to this
+unit` for BLE/unbound bays. No hold/release, no `/dmk`.
+
+**FP2 gives COMMANDING, not WATCHING.** Both motor-less consoles (desk unit and emulator)
+report `CURRENT_KPH == 0`, so FP2 must never feed `belt_speed`: a 0 mph sample would fail
+against the reference plant and, worse, make `moving` permanently false and silently
+disarm the unattended-motion alarm — the 2026-08-18 incident. Consequence: the FP2-only bay
+has no `belt_speed` channel, so `TwinEngine.watchdogTick` returns early (twin.ts:429) and
+**the unattended-motion alarm is disarmed on u03 until an independent tach (Pi net source)
+owns `belt_speed`.** Watchdog semantics are otherwise untouched: an FP2-driven scenario is
+"in charge" exactly like today's scenarios; `WORKOUT_STATE` was deliberately NOT made an
+in-charge signal (it would disarm the alarm the watchdog exists for).
+
+Skipped on purpose: merged source (FP2 + Pi on one bay), watchdog widening, `/dmk`, key
+hold/release, a REST console route (status rides the states batch), TS-side reconnect
+supervision beyond the 3 s WS retry.
+
+### 2026-09-16 later — model-keyed binding, four emulators, IF17/IF20 LCD
+
+Gateway link names (TabletAutoTest `config/fp2_consoles.json`): `pm210` (ETNT17915V2, TCP
+3457), `if17-xylophone` (ETPF59724BCV1, 3458), `op` (bike, 3459 — not bound by TwinView),
+`if20` (ETNT17624V1, 3460), `if17-esp` (ETPF90924V1, 3461), `dfab` (BLE desk console). The
+old name `emulator` is gone; `fp2EmulatorLcd` went with it.
+
+Binding (`server/src/consoles.ts`, pure + `consoles.test.ts` via
+`node --import tsx --test server/src/consoles.test.ts`): `DEFAULT_CONSOLE_BY_MODEL`
+(NTL17915 -> pm210, NTL17624 -> if20, PFTL59724 -> if17-xylophone, PFTL90924 -> if17-esp) and
+`LCD_BY_LINK` (panel HTTP 8889/8890/8891/8892/8893, server-side only — the browser never
+learns the emulator host). Per bay, first hit wins (`bindingFor` in main.ts):
+1. `bay.console` from the floor editor — BLE by device code (`ble-<code>`, registered with
+   `PUT /v1/links`), or `"emulator"` = the emulator for the model placed on the bay (PM210
+   when the model has none);
+2. `config.fleet.consoles[unitId]` — a gateway link name (`"dfab"`) or `{ link, lcd }` to
+   pin a panel URL (config-only emulator <-> BLE switch);
+3. `DEFAULT_CONSOLE_BY_MODEL[bay.machine.model]`.
+So a bay whose placed model is one of the four automatically shows THAT emulator's LCD and
+talks FP2 to THAT link; `syncConsoles()` re-derives everything from the layout on every
+commit, so a model swap in the lab editor rebuilds the unit and rebinds the console (the
+unit's event ring is lost; the gateway keeps the old link open by design —
+`DELETE /v1/links/<name>` drops a BLE session). A console takes one master: two bays
+resolving to the same link (two NTL17624s) -> first bay in floor order wins, the rest are
+warned and stay mock. Sensor-owned bays (Pi/serial) still attach commander-only. The seeded
+grid no longer stamps `bay.console`; `fleet.models` fixes each pinned bay's kind instead
+(`kindForModel`), so the shipped `config.json` (`size 12`, models u03..u06) never lands a
+treadmill model on a rower slot. `TWINVIEW_LAB=<path>` (like `TWINVIEW_CONFIG`) points a
+run at an alternate live floor so verify runs never touch `lab.json`.
+
+fp2.ts: the gateway now subscribes `KEY_ARRAY1..4` (raw membrane bytes, idle 255). Consoles
+without `KEY_COOKED` (IF20, both IF17s — `hello.subscribed` says) get their presses named
+from the bound emulator's panelmap (`panelmap()` memo shared with the LCD proxy): exact
+`(index, mask)` hit, else chord `A+B`, else `KEY_ARRAYn=v`; the same key twice with no 255 in
+between is one edge. `KEY_COOKED` wins where subscribed (PM210, BLE). A console-origin
+`WORKOUT_STATE` 5/0 leaving an active state (2/3/4) while a scenario runs calls
+`engine.stopScenario()` + a warn event (`Console stopped workout - scenario aborted`); our own
+end-of-scenario 5 arrives as an echo and is skipped, and 6 (results) never aborts. Write
+replies carry `errors` (board rejections such as `DATA_OUT_OF_RANGE`) -> one warn instead of
+the misleading `not echoed` line. FP2-only bays log one warn at start (`no independent tach
+... watchdog disarmed`) — the disarm is unchanged, now visible.
+
+Web (`web/src/scene/pm210Lcd.ts`, one renderer): the schema comes from the panelmap, never
+from `display`, port or model — `gpiokeys`/`punct` -> unsupported first (OP bike),
+`Array.isArray(digits)` -> segments (IF17/IF20 digits + font, port of
+`IF20HT1621Panel.cs draw(d)`), else dots (PM210 polygons). IF glass is letterboxed to 16:10
+in the canvas; `ConsoleKeys` sections come from `keys[].sec` (adds `media`).
+
+Follow-ups: OP bike (needs a bike `MachineKind`, `POST /gpio` presses, third panel schema;
+`panelSchema()` returns `unsupported` so a hand binding cannot crash the viewer); grace bump
+on console-origin START for instrumented bays (needs a TwinEngine API); per-client `_EXPECT`
+in the gateway (exactly one TwinView server per gateway link today); lab-wall emulator LCDs;
+key edges from `link.samples`.
+
 ## Update 2026-08-18 — unattended-motion safety watchdog (real bays)
 
 Incident same day: a TabletAutoTest matrix run lost its adb transport mid-run; the
@@ -485,7 +760,7 @@ against the live scene graph (`window.__viewer` hook) before trusting frame find
 2. If conversion didn't land, coordinate getting the GLB (or zip + SolidWorks) onto one machine and finish it.
 3. Real hardware wiring (all interfaces stubbed and ready):
    - Sensors: `config.json` → `{"source":"serial","serialConfigPath":"..."}`; config format matches TabletAutoTest's `config/treadmill_sensors.json` (per channel `{port, baud, pattern, scale, unit}`, regex group 1 = value, channels can share a COM port). Install `serialport` in the server workspace and wire port I/O in `server/src/sources/serial.ts` (`SerialSource.start()` TODO; `ingestLine()` parsing is done).
-   - Console screen: proxy TabletAutoTest LiveView MJPEG (`GET :8093/v1/devices/{id}/stream?fps=5`) in `server/src/main.ts` (stub: `server/src/screen/`), swap the mock canvas for the stream in `web/src/App.tsx`. TabletAutoTest facts: console exposes NO machine telemetry over ADB (external sensors are the only ground truth); setpoints are commanded via calibrated UI taps; its services start with `python run_services.py` on the rig machine.
+   - SUPERSEDED for FP2-capable consoles (see 2026-09-16): FP2 is the preferred commander and telemetry path; adb taps remain for tablet consoles. Console screen: proxy TabletAutoTest LiveView MJPEG (`GET :8093/v1/devices/{id}/stream?fps=5`) in `server/src/main.ts` (stub: `server/src/screen/`), swap the mock canvas for the stream in `web/src/App.tsx`. TabletAutoTest facts: console exposes NO machine telemetry over ADB (external sensors are the only ground truth); setpoints are commanded via calibrated UI taps; its services start with `python run_services.py` on the rig machine.
 4. Later: multi-model support (the fallback/rig architecture is already model-agnostic), QA pass/fail report export, tolerance config per model.
 
 ## Watch out for

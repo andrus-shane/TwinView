@@ -13,6 +13,12 @@ Windows, mounts at `/boot/firmware` on the Pi).
 > If the new machine *also* refuses to write the card, it has the same
 > removable-drive policy — use a personal machine or one without that group policy.
 
+
+> **Verified 2026-09-16 on this card:** the OS is Raspberry Pi OS / Debian 13 trixie with
+> cloud-init + NetworkManager (not Ubuntu/netplan). Editing `network-config` + bumping the
+> instance id from a Windows laptop worked first time; `D:` was writable on the newer
+> laptop, so the BitLocker note above only applies to the original machine.
+
 ## 1. Copy the program onto the boot partition
 Copy both files (from this folder) to the **root of the boot partition** so they
 land at `/boot/firmware/` on the Pi:
@@ -26,7 +32,7 @@ dtparam=i2c_arm=on
 ```
 
 ## 3. Force a re-provision — `meta-data`
-cloud-init only applies `user-data` once per instance id. Bump it:
+cloud-init only applies `user-data` AND `network-config` once per instance id. Bump it here and in the `i=` token of `cmdline.txt` (`ds=nocloud;i=...`) so the two agree; a new id also regenerates the Pi's ssh host keys (re-pin in check_pi.sh/plink):
 ```
 instance-id: rig-20260728-01
 ```
@@ -59,7 +65,7 @@ runcmd:
 ```
 
 ## 5. Eject and boot
-First boot installs packages over Wi-Fi (SSID `ifit`) and starts the service —
+First boot installs packages over Wi-Fi (SSIDs `OS Testing` and `ifit` since 2026-09-16) and starts the service —
 allow a few minutes. Then verify per `README.md`:
 ```bash
 i2cdetect -y 1                 # WT901 at 0x50

@@ -1,11 +1,13 @@
 import {
   CHANNELS_BY_KIND,
+  KPH_PER_MPH,
   SETPOINT_META,
   type ChannelId,
   type ChannelReading,
   type ChannelStatus,
   type FaultId,
   type MachineKind,
+  type SpeedUnit,
   type TwinEvent,
   type TwinState,
 } from '@twinview/shared';
@@ -243,6 +245,12 @@ export class TwinEngine {
   /** Coast-down grace deadline after a run/scenario ends */
   private graceUntil = 0;
   private wasAutomationRunning = false;
+  /**
+   * Presentation only: the unit the bay's console displays. Setpoints and channel math stay
+   * in mph (FP2 and the plant models are fixed); belt_speed is converted where humans read it —
+   * getState() channel values/tolerances, deviation and watchdog events, formatSpeed().
+   */
+  private speedUnit: SpeedUnit = 'mph';
 
   constructor(
     private source: TelemetrySource,
@@ -272,6 +280,20 @@ export class TwinEngine {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+  }
+
+  setSpeedUnit(unit: SpeedUnit): void {
+    this.speedUnit = unit;
+  }
+
+  /** Speed for humans, in the unit this bay's console displays (internal value is mph). */
+  formatSpeed(mph: number): string {
+    return this.speedUnit === 'kph' ? `${(mph * KPH_PER_MPH).toFixed(1)} km/h` : `${mph.toFixed(1)} mph`;
+  }
+
+  /** Display factor + unit label for a channel (belt_speed follows the console's unit) */
+  private display(id: ChannelId, unit: string): { f: number; unit: string } {
+    return id === 'belt_speed' && this.speedUnit === 'kph' ? { f: KPH_PER_MPH, unit: 'km/h' } : { f: 1, unit };
   }
 
   onState(fn: (s: TwinState) => void): () => void {
@@ -345,13 +367,14 @@ export class TwinEngine {
       // interval/derivative math only; on Pi-fed bays it can sit a clock-fit
       // bias away from the host timeline and must not gate freshness.
       const stale = !sample || now - sample.tHost > STALE_MS;
+      const d = this.display(id, spec.unit);
       channels[id] = {
-        cmd: spec.expected(this.reference),
-        meas: sample?.value ?? 0,
+        cmd: spec.expected(this.reference) * d.f,
+        meas: (sample?.value ?? 0) * d.f,
         status: stale ? 'stale' : this.status[id] ?? 'ok',
-        warnTol: spec.warnTol,
-        failTol: spec.failTol,
-        unit: spec.unit,
+        warnTol: Math.round(spec.warnTol * d.f * 100) / 100,
+        failTol: Math.round(spec.failTol * d.f * 100) / 100,
+        unit: d.unit,
         label: spec.label,
       };
     }
@@ -450,7 +473,9 @@ export class TwinEngine {
           this.logEvent(
             watch.channel,
             'alarm',
-            `UNATTENDED MOTION: measured ${sample.value.toFixed(1)} ${watch.unit} with no active ` +
+            `UNATTENDED MOTION: measured ${
+              watch.channel === 'belt_speed' ? this.formatSpeed(sample.value) : `${sample.value.toFixed(1)} ${watch.unit}`
+            } with no active ` +
               `automation run or scenario — machine is moving with nobody in charge`,
           );
         }
@@ -483,11 +508,13 @@ export class TwinEngine {
       this.status[id] = target;
       delete this.pendingStatus[id];
       const sev: TwinEvent['severity'] = target === 'ok' ? 'info' : target === 'fail' ? 'fail' : 'warn';
+      const d = this.display(id, spec.unit);
+      const tol = (target === 'fail' ? spec.failTol : spec.warnTol) * d.f;
       const msg =
         target === 'ok'
           ? `${spec.label} back within tolerance`
-          : `${spec.label} deviation ${dev.toFixed(2)} ${spec.unit} (was ${prev}, tol ±${
-              target === 'fail' ? spec.failTol : spec.warnTol
+          : `${spec.label} deviation ${(dev * d.f).toFixed(2)} ${d.unit} (was ${prev}, tol ±${
+              d.f === 1 ? tol : tol.toFixed(2)
             })`;
       this.logEvent(id, sev, msg);
     }

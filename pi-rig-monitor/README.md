@@ -81,6 +81,41 @@ Point TwinView at this Pi with `network_sensors.json` (host
 `testingraspberryzero2.local`, port 5000) and set `config.json` to
 `"source": "mock"` + `"netConfigPath": "network_sensors.json"`.
 
+## Network and remote access (as of 2026-09-16)
+
+The Pi lives on the lab Wi-Fi **`OS Testing`** (TP-Link Omada, WPA2/WPA3 transition,
+192.168.1.0/24, has internet + NTP) and keeps the lease **192.168.1.134**; the old
+"isolated bench Wi-Fi" `ifit` is the same LAN and stays configured as a fallback. From
+a laptop on `OS Testing`, `testingraspberryzero2.local` resolves (mDNS) and
+`nc testingraspberryzero2.local 5000` shows the stream. Corporate `iconwireless`
+cannot reach it.
+
+The card runs Raspberry Pi OS (Debian 13 trixie) with **cloud-init + NetworkManager**,
+not Ubuntu/netplan: `network-config` on the boot partition is rendered into
+`netplan-wlan0-<ssid>` NM profiles once per `instance-id` (see DEPLOY.md step 3). The
+2026-09-16 re-home added `"OS Testing"` (`auth: key-management: sae`) and bumped the id to
+`rig-20260916-ostesting` in both `meta-data` and the `i=` token of `cmdline.txt`.
+
+Health check from Windows (Git Bash + PuTTY plink; PuTTY prompts for unknown host keys
+on the console, not stdin, so the script pins the key it fetches with `ssh-keyscan`):
+
+```bash
+PI_PASS=... bash pi-rig-monitor/check_pi.sh                 # by mDNS name
+PI_PASS=... bash pi-rig-monitor/check_pi.sh 192.168.1.134   # by IP
+PI_PASS=... bash pi-rig-monitor/check_pi.sh 192.168.1.134 --no-adb-bridge
+```
+
+`i2c-tools` is not installed on the Pi, so the `i2cdetect` row reads blank even though
+the WT901 is streaming; trust the `incline.*` timestamps advancing instead.
+
+**Bay move 2026-09-16:** the Pi moved from bay 1 (Android console, adb relay) to the
+BLE-console treadmill bay `u03` (NTL17915). `adb-server.service` and
+`adb-bridge.service` are **disabled** there (no USB console; re-enable with
+`sudo systemctl enable --now adb-server adb-bridge`). TwinView's `network_sensors.json`
+keys the Pi to `u03`. The WT901 mount differs on this unit: the deck reads about +2.6 %
+grade at rest against bay 1's `PITCH_RAW_LEVEL`, so incline needs a fresh level
+calibration on the NTL17915 before its readings mean anything.
+
 ## Console adb bridge (USB, no Wi-Fi)
 
 The Pi doubles as an adb bridge to the machine console plugged into its data

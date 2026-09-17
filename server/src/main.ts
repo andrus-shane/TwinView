@@ -10,6 +10,7 @@ import {
   kindForModel,
   type ChannelId,
   type FaultId,
+  type LabBay,
   type LabLayout,
   type LabRealBays,
   type MachineKind,
@@ -17,8 +18,17 @@ import {
   type ServerMessage,
 } from '@twinview/shared';
 import { AutomationBridge } from './automation.js';
+import {
+  DEFAULT_CONSOLE_BY_MODEL,
+  LCD_BY_LINK,
+  resolveConsole,
+  type ConsoleBinding,
+  type ConsoleSpec,
+} from './consoles.js';
 import { Fleet, type RealBaySpec } from './fleet.js';
-import { LabStore, normalizeLayout, seedLayout } from './lab.js';
+import { Fp2Console } from './fp2.js';
+import { LabStore, baysInOrder, normalizeLayout, seedLayout } from './lab.js';
+import { registerLcdRoutes } from './pm210.js';
 import { NetSource, loadNetConfig } from './sources/net.js';
 import { SerialSource, loadSerialConfig } from './sources/serial.js';
 import type { TelemetrySource } from './sources/types.js';
@@ -38,9 +48,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..', '..');
 const MODELS_DIR = join(ROOT, 'models');
 const RIG_PATH = join(MODELS_DIR, 'rig.json');
-const CONFIG_PATH = join(ROOT, 'config.json');
-/** The live lab floor (rows of bays); rewritten on every edit. Named snapshots go in layouts/. */
-const LAB_PATH = join(ROOT, 'lab.json');
+// TWINVIEW_CONFIG (absolute or relative to the repo root) points a run at an alternate config
+const CONFIG_PATH = process.env.TWINVIEW_CONFIG
+  ? resolve(ROOT, process.env.TWINVIEW_CONFIG)
+  : join(ROOT, 'config.json');
+/**
+ * The live lab floor (rows of bays); rewritten on every edit. Named snapshots go in layouts/.
+ * TWINVIEW_LAB (absolute or relative to the repo root) points a run at an alternate live floor — used by the verify runs.
+ */
+const LAB_PATH = process.env.TWINVIEW_LAB ? resolve(ROOT, process.env.TWINVIEW_LAB) : join(ROOT, 'lab.json');
 const LAYOUTS_DIR = join(ROOT, 'layouts');
 
 const STATES_TICK_MS = 100; // 10 Hz fleet state batch
@@ -53,6 +69,10 @@ interface AppConfig {
   netConfigPath?: string;
   port: number;
   scrcpyDir?: string;
+  /** FP2 gateway base URL (TabletAutoTest services/fp2_gateway); default http://127.0.0.1:8102 */
+  fp2Gateway?: string;
+  /** Advertised BLE name prefix — the device code shown on the console completes it; default iFIT_Tread_ */
+  fp2BleNamePrefix?: string;
   /**
    * Seed for the lab floor the FIRST time the server runs (no lab.json yet):
    * size/rowers/ellipticals/pilates/models describe the classic grid. After
@@ -73,6 +93,12 @@ interface AppConfig {
     models?: Record<string, string>;
     /** Restrict a bay's tracked channels: unit id -> channel ids (e.g. "u03": ["belt_speed","incline"]) */
     channels?: Record<string, string[]>;
+    /**
+     * Pin a bay's FP2 console: unit id -> gateway link name ("dfab") or { link, lcd }.
+     * Beaten by bay.console from the floor editor; default = DEFAULT_CONSOLE_BY_MODEL[model]
+     * (server/src/consoles.ts) for the model placed on the bay.
+     */
+    consoles?: Record<string, ConsoleSpec>;
   };
   /** Bridge to the TabletAutoTest repo (list + launch automation workflows) */
   automation?: {
@@ -124,10 +150,6 @@ if (config.netConfigPath) {
     });
   }
 }
-const realBaysWire: LabRealBays = Object.fromEntries(
-  [...realBays].map(([id, r]) => [id, { kind: r.kind, source: r.sourceKind }]),
-);
-
 // Bridge to the TabletAutoTest repo: real bays can launch its automation
 // workflows on their assigned tablet console straight from Test Control.
 const automation = new AutomationBridge(
@@ -136,6 +158,206 @@ const automation = new AutomationBridge(
   join(ROOT, 'automation-logs'),
   `http://127.0.0.1:${config.port}`,
 );
+
+// --- FP2 consoles (the Renode emulators, or a BLE console found by the device
+// code shown on it) via the TabletAutoTest FP2 gateway. Binding per bay, first
+// hit wins:
+//   1. bay.console in the lab layout (floor editor): BLE by device code, or
+//      "emulator" = the emulator for the model placed on the bay;
+//   2. config fleet.consoles[unitId]: a gateway link name ("dfab") or { link, lcd };
+//   3. DEFAULT_CONSOLE_BY_MODEL[bay.machine.model] (server/src/consoles.ts) — an
+//      NTL17624 dropped on any bay talks to the IF20 emulator and shows its LCD.
+// A console makes its bay real (source kind 'fp2', incline channel only) unless
+// serial/net already own the bay — then it attaches commander-only: setpoints
+// out, events in, no channels. Like every real source it is built per placement
+// (Fleet.addUnit -> makeSource); `consoles` tracks the live instance for status
+// decoration + the LCD proxy. ---
+const FP2_GATEWAY = config.fp2Gateway ?? 'http://127.0.0.1:8102';
+/** Advertised BLE name = this prefix + the device code (iFIT_Tread_1CSF) */
+const BLE_NAME_PREFIX = config.fp2BleNamePrefix ?? 'iFIT_Tread_';
+interface ConsoleEntry extends ConsoleBinding {
+  /** Current instance; undefined until the bay has a machine placed */
+  con?: Fp2Console;
+  /** Gateway catalog entry for a BLE console (device_name drives Pair); null for catalog links */
+  catalog?: Record<string, unknown> | null;
+  /**
+   * The model's emulator acting as DESK console for a real (BLE) panel we cannot render:
+   * its LCD shows on the unit and its membrane keys drive the machine through the twin.
+   */
+  desk?: { link: string; lcd?: string; con?: Fp2Console };
+}
+const consoles = new Map<string, ConsoleEntry>();
+/** The serial/net bays as configured; `realBays` is rebuilt from these on every layout commit. */
+const sensorBays = new Map(realBays);
+const sensorKinds = new Map([...sensorBays].map(([id, r]) => [id, r.kind] as const));
+const commanderWarned = new Set<string>();
+let realBaysWire: LabRealBays = {};
+
+/**
+ * Gateway link for a bay (see the precedence above). Emulator links are in the
+ * gateway's static catalog and carry their Renode panel URL; a BLE console is
+ * registered at connect time by device code (PUT /v1/links/<name>, same
+ * timeouts as the catalog's desk console).
+ */
+function bindingFor(bay: LabBay): (ConsoleBinding & { catalog: Record<string, unknown> | null }) | undefined {
+  const c = bay.console;
+  if (c?.kind === 'ble') {
+    return {
+      link: `ble-${c.code.toLowerCase()}`,
+      catalog: {
+        transport: 'ble',
+        device_name: `${BLE_NAME_PREFIX}${c.code}`,
+        setup_timeout_s: 45,
+        connect_timeout_s: 60,
+      },
+    };
+  }
+  const model = bay.machine?.model ?? '';
+  if (c?.kind === 'emulator') {
+    // the editor's "emulator" = the emulator for the placed model; PM210 when the model has none
+    const link = DEFAULT_CONSOLE_BY_MODEL[model] ?? 'pm210';
+    return { link, lcd: LCD_BY_LINK[link], catalog: null };
+  }
+  if (!bay.machine) return undefined;
+  const bound = resolveConsole(bay.id, model, config.fleet?.consoles);
+  return bound && { ...bound, catalog: null };
+}
+
+/** Rebuild realBays + the console map from the layout's bindings; Fleet.applyLayout then reconciles units. */
+function syncConsoles(next: LabLayout): void {
+  realBays.clear();
+  for (const [id, spec] of sensorBays) realBays.set(id, { ...spec });
+  const prev = new Map(consoles);
+  consoles.clear();
+  // A console takes ONE master: two bays resolving to the same link (two NTL17624s on the
+  // floor) would fight over it. Bays with an explicit binding (bay.console in the layout,
+  // including the desk emulator a BLE bay borrows) claim their links first, then model
+  // defaults in floor order; the rest get no console.
+  const linkOwners = new Map<string, string>();
+  const claim = (link: string, unitId: string, what: string): boolean => {
+    const owner = linkOwners.get(link);
+    if (owner && owner !== unitId) {
+      console.warn(`[lab] ${unitId}: ${what} '${link}' is already bound to ${owner} — ${unitId} gets none`);
+      return false;
+    }
+    linkOwners.set(link, unitId);
+    return true;
+  };
+  const bays = baysInOrder(next);
+  for (const bay of [...bays.filter((b) => b.console), ...bays.filter((b) => !b.console)]) {
+    const bound = bindingFor(bay);
+    if (!bound) continue;
+    const unitId = bay.id;
+    if (!claim(bound.link, unitId, 'console')) continue;
+    const { link, catalog } = bound;
+    let lcd = bound.lcd;
+    // A real (BLE) console has no panel we can render, so the model's emulator becomes the
+    // bay's DESK console: LCD on the unit, membrane keys driving this machine via the twin.
+    let desk: ConsoleEntry['desk'];
+    const deskLink = bay.console?.kind === 'ble' ? DEFAULT_CONSOLE_BY_MODEL[bay.machine?.model ?? ''] : undefined;
+    if (deskLink && claim(deskLink, unitId, 'desk console')) {
+      desk = { link: deskLink, lcd: LCD_BY_LINK[deskLink] };
+      lcd = desk.lcd;
+    }
+    // Same links as before = Fleet keeps the unit (specChanged is false) and the running
+    // instances must survive the rebuild of this map.
+    const kept = prev.get(unitId);
+    const keep = kept?.link === link && (kept?.desk?.link ?? null) === (desk?.link ?? null);
+    const entry: ConsoleEntry = {
+      link,
+      lcd,
+      catalog,
+      con: keep ? kept?.con : undefined,
+      desk: desk && { ...desk, con: keep ? kept?.desk?.con : undefined },
+    };
+    consoles.set(unitId, entry);
+    // closures over the later consts: only invoked from start(), after construction
+    const engineOf = () => fleet.get(unitId)!.engine;
+    const automationOn = () => automation.status(unitId)?.status === 'running';
+    /** The bay's console(s): the machine panel, plus the desk emulator paired with it. */
+    const makeConsoles = (): Fp2Console[] => {
+      entry.con = new Fp2Console(unitId, link, FP2_GATEWAY, desk ? undefined : lcd, engineOf, automationOn, catalog);
+      const made = [entry.con];
+      if (entry.desk) {
+        entry.desk.con = new Fp2Console(
+          unitId,
+          entry.desk.link,
+          FP2_GATEWAY,
+          entry.desk.lcd,
+          engineOf,
+          automationOn,
+          null,
+          'desk',
+        );
+        entry.con.setPeer(entry.desk.con);
+        entry.desk.con.setPeer(entry.con);
+        made.push(entry.desk.con);
+      }
+      return made;
+    };
+    const ble = catalog?.device_name;
+    const consoleInfo = {
+      link,
+      lcd: !!lcd,
+      ...(typeof ble === 'string' ? { ble } : {}),
+      ...(desk ? { desk: desk.link } : {}),
+    };
+    const owned = realBays.get(unitId);
+    if (owned) {
+      if (!commanderWarned.has(unitId)) {
+        commanderWarned.add(unitId);
+        console.warn(
+          `[lab] ${unitId} already has ${owned.sourceKind} telemetry — console '${link}' attaches commander-only (setpoints out, events in, no channels)`,
+        );
+      }
+      // Commander-only: ride along with the bay's sensor source so the console(s)
+      // start/stop with each placement; latest() stays the sensor's alone.
+      const makeInner = owned.makeSource;
+      owned.makeSource = (): TelemetrySource => {
+        const inner = makeInner();
+        const cons = makeConsoles();
+        return {
+          kind: inner.kind,
+          start: async () => {
+            await inner.start();
+            for (const c of cons) await c.start();
+          },
+          stop: async () => {
+            for (const c of cons) await c.stop();
+            await inner.stop();
+          },
+          latest: (ch) => inner.latest(ch),
+        };
+      };
+      owned.console = consoleInfo;
+    } else {
+      realBays.set(unitId, {
+        kind: bay.machine?.kind ?? 'treadmill', // the bay's own kind: Fleet.applyLayout compares kinds to decide rebuilds
+        sourceKind: 'fp2',
+        makeSource: (): TelemetrySource => {
+          const cons = makeConsoles();
+          const [machine] = cons;
+          if (cons.length === 1) return machine;
+          return {
+            kind: 'fp2',
+            start: async () => {
+              for (const c of cons) await c.start();
+            },
+            stop: async () => {
+              for (const c of cons) await c.stop();
+            },
+            latest: (ch) => machine.latest(ch),
+          };
+        },
+        channels: ['incline'], // never belt_speed: see fp2.ts
+        console: consoleInfo,
+      });
+    }
+  }
+  realBaysWire = Object.fromEntries(
+    [...realBays].map(([id, r]) => [id, { kind: r.kind, source: r.sourceKind }]),
+  );
+}
 
 const fleet = new Fleet({
   channels: config.fleet?.channels as Record<string, ChannelId[]> | undefined,
@@ -157,12 +379,13 @@ const seedFromConfig = (): LabLayout =>
     ellipticals: config.fleet?.ellipticals ?? 2,
     pilates: config.fleet?.pilates ?? 2,
     models: config.fleet?.models,
-    realKinds: fleet.realKinds(),
+    realKinds: sensorKinds,
+    consoles: config.fleet?.consoles,
   });
 let layout: LabLayout;
 {
   const live = labStore.loadLive();
-  const norm = live ? normalizeLayout(live, fleet.realKinds()) : null;
+  const norm = live ? normalizeLayout(live, sensorKinds) : null;
   if (norm && 'layout' in norm) {
     layout = norm.layout;
   } else {
@@ -172,15 +395,38 @@ let layout: LabLayout;
     console.log(`[lab] seeded ${LAB_PATH} from config.json (${layout.rows.length} rows)`);
   }
 }
+syncConsoles(layout);
 fleet.applyLayout(layout);
+for (const u of fleet.units()) {
+  if (u.console) console.log(`[fp2] ${u.id} (${u.model}) -> ${u.console.link}${u.console.lcd ? ' + LCD' : ''}`);
+}
 
 /** Install a validated layout: reconcile the roster, persist, tell every client. */
 function commitLayout(next: LabLayout): void {
   layout = next;
+  syncConsoles(layout); // console bindings live in the layout; the fleet rebuilds rebound bays
   fleet.applyLayout(layout); // broadcasts `fleet` itself when the roster changed
   labStore.saveLive(layout);
   broadcast({ type: 'lab', layout, real: realBaysWire });
   void assignScreens(lastDevices); // new bays pick up spare tablets
+}
+
+/** The 10 Hz states batch with each console bay's live FP2 status decorated in. */
+/** The bay's console status with the desk console's link health folded in; undefined = no live console. */
+function consoleStatusFor(id: string) {
+  const entry = consoles.get(id);
+  if (!entry?.con) return undefined;
+  const deskCon = entry.desk?.con;
+  return deskCon ? { ...entry.con.status(), deskLink: deskCon.status().link } : entry.con.status();
+}
+
+function statesWithConsole() {
+  const states = fleet.statesSnapshot();
+  for (const id of consoles.keys()) {
+    const status = consoleStatusFor(id);
+    if (status && states[id]) states[id].console = status;
+  }
+  return states;
 }
 
 // --- Model catalog: legacy current.glb (treadmill) + any <MODEL>.glb dropped
@@ -295,7 +541,42 @@ app.get('/api/scenarios', async () =>
 app.get<{ Params: { id: string } }>('/api/units/:id/state', async (req, reply) => {
   const u = fleet.get(req.params.id);
   if (!u) return reply.code(404).send({ error: `unknown unit: ${req.params.id}` });
-  return u.engine.getState();
+  const status = consoleStatusFor(req.params.id);
+  return status ? { ...u.engine.getState(), console: status } : u.engine.getState();
+});
+
+// Bond this PC with the bay's BLE console (Windows "Just Works" pairing, done by the
+// gateway which owns the host's BLE). An unbonded host gets a GATT connection but no
+// FP2 replies, so a console pairs once per host; the link then opens on its own retry.
+app.post<{ Params: { id: string } }>('/api/units/:id/console/pair', async (req, reply) => {
+  const id = req.params.id;
+  const u = fleet.get(id);
+  if (!u) return reply.code(404).send({ error: `unknown unit: ${id}` });
+  const entry = consoles.get(id);
+  const device = entry?.catalog?.device_name;
+  if (!entry || typeof device !== 'string') {
+    return reply.code(409).send({ error: 'this bay has no BLE console to pair' });
+  }
+  u.engine.logEvent('system', 'info', `Pairing this PC with ${device} (Just Works)…`);
+  try {
+    const r = await fetch(`${FP2_GATEWAY}/v1/ble/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_name: device, link: entry.link, timeout_s: 20 }),
+    });
+    const body = (await r.json().catch(() => ({}))) as { ok?: boolean; detail?: string; address?: string };
+    if (!r.ok || !body.ok) {
+      const msg = body.detail ?? `HTTP ${r.status}`;
+      u.engine.logEvent('system', 'warn', `Pairing with ${device} failed: ${msg}`);
+      return reply.code(502).send({ error: msg });
+    }
+    u.engine.logEvent('system', 'info', `Paired with ${device} (${body.address ?? '?'}) — the FP2 link reconnects on its own`);
+    return { ok: true, device, address: body.address ?? null };
+  } catch (e) {
+    const msg = `FP2 gateway unreachable: ${String((e as Error).message ?? e)}`;
+    u.engine.logEvent('system', 'warn', msg);
+    return reply.code(502).send({ error: msg });
+  }
 });
 
 app.post<{ Params: { id: string }; Body: { id: string } }>(
@@ -373,6 +654,8 @@ app.get<{ Params: { id: string } }>('/api/units/:id/automation', async (req, rep
   return {
     available: automation.available(),
     serial: u.info.screenSerial ?? null,
+    /** FP2 gateway link of the bay's console — device-less console workflows run against it */
+    console: consoles.get(req.params.id)?.link ?? null,
     run: automation.status(req.params.id),
   };
 });
@@ -388,11 +671,24 @@ app.post<{ Params: { id: string }; Body: { workflowId: string } }>(
     if (u.info.source === 'mock') {
       return reply.code(409).send({ error: 'automation workflows target real hardware bays only' });
     }
-    const serial = u.info.screenSerial;
+    // Console-bound bays also run the device-less FP2 workflows (test.ble_console_*): those go
+    // out with serial `host` even when the bay has a tablet, and command the console through
+    // the gateway link TwinView already holds.
+    const workflowId = req.body?.workflowId ?? '';
+    const consoleEntry = consoles.get(req.params.id);
+    const deviceless = consoleEntry && /^test\.ble_console_/.test(workflowId);
+    const serial = deviceless ? 'host' : (u.info.screenSerial ?? (consoleEntry ? 'host' : undefined));
     if (!serial) {
-      return reply.code(409).send({ error: 'no tablet console assigned to this bay' });
+      return reply.code(409).send({ error: 'no tablet console or FP2 console on this bay' });
     }
-    const res = automation.run(req.params.id, req.body?.workflowId ?? '', serial);
+    // An international machine (bay.units = kph) tells every run from this bay to work in the unit
+    // its console/tablet displays: the FP2 matrix steps in whole km/h; tablet workflows can read
+    // TREADMILL_SPEED_UNIT the same way.
+    const units = baysInOrder(layout).find((b) => b.id === req.params.id)?.units;
+    const res = automation.run(req.params.id, workflowId, serial, {
+      ...(consoleEntry ? { FP2_GATEWAY_URL: FP2_GATEWAY, FP2_GATEWAY_LINK: consoleEntry.link } : {}),
+      ...(units ? { FP2_SPEED_UNIT: units, TREADMILL_SPEED_UNIT: units } : {}),
+    });
     if ('error' in res) return reply.code(409).send(res);
     return res;
   },
@@ -413,7 +709,7 @@ app.get('/api/lab', async () => ({ layout, real: realBaysWire }));
 
 // Whole-layout replace: the web is the editor, the server reconciles the fleet.
 app.put<{ Body: unknown }>('/api/lab', async (req, reply) => {
-  const norm = normalizeLayout(req.body, fleet.realKinds());
+  const norm = normalizeLayout(req.body, sensorKinds);
   if ('error' in norm) return reply.code(400).send({ error: norm.error });
   commitLayout(norm.layout);
   return { layout, real: realBaysWire };
@@ -439,7 +735,7 @@ app.post<{ Params: { name: string } }>('/api/lab/layouts/:name/load', async (req
   if (!LabStore.validName(name)) return reply.code(400).send({ error: 'invalid layout name' });
   const saved = labStore.load(name);
   if (!saved) return reply.code(404).send({ error: `no saved layout: ${name}` });
-  const norm = normalizeLayout(saved, fleet.realKinds());
+  const norm = normalizeLayout(saved, sensorKinds);
   if ('error' in norm) return reply.code(409).send({ error: `saved layout invalid: ${norm.error}` });
   commitLayout(norm.layout);
   return { layout, real: realBaysWire };
@@ -566,6 +862,10 @@ app.post<{
   }
 });
 
+// Emulated LCD (Renode PM210 / IF17 / IF20) proxy for console bays with an `lcd` URL;
+// keyed on unit id so the browser never picks the upstream host.
+registerLcdRoutes(app, (id) => (fleet.get(id) ? consoles.get(id)?.lcd : null));
+
 // Per-model CAD info; no ?model= (or the default id) = legacy current.glb behavior.
 // A model whose files haven't landed yet returns nulls — the web falls back to the proxy.
 app.get<{ Querystring: { model?: string } }>('/api/model-info', async (req, reply) => {
@@ -614,7 +914,7 @@ app.register(async (scoped) => {
     );
     socket.send(JSON.stringify({ type: 'lab', layout, real: realBaysWire } satisfies ServerMessage));
     socket.send(JSON.stringify({ type: 'rig', rig: loadRig() } satisfies ServerMessage));
-    socket.send(JSON.stringify({ type: 'states', states: fleet.statesSnapshot() } satisfies ServerMessage));
+    socket.send(JSON.stringify({ type: 'states', states: statesWithConsole() } satisfies ServerMessage));
     socket.on('close', () => sockets.delete(socket));
   });
 
@@ -653,7 +953,7 @@ fleet.onFleetChange(() =>
 );
 
 setInterval(() => {
-  if (sockets.size > 0) broadcast({ type: 'states', states: fleet.statesSnapshot() });
+  if (sockets.size > 0) broadcast({ type: 'states', states: statesWithConsole() });
 }, STATES_TICK_MS);
 
 await fleet.start();
