@@ -145,6 +145,18 @@ peak decel 3.1 mph/s (ASTM 6.0), no ramp timeouts. Step fixes that followed: dec
 the console's echoed grade (56 false timeouts before), refused grade writes retried once,
 `deck_moves` recorded per cycle; incline step default 1.0 (whole levels; 0.5 = native step).
 
+**Incline calibration over FP2 — the fix for the map above** (2026-09-17 16:03, Shane watching):
+`test.ble_console_incline_calibration` (`treadmill.fp2_incline_calibration`) wrote
+`CALIBRATE_GRADE=start`; the board ran in_progress for 82 s, deck travel -0.01..9.18 % on the
+grade board, then succeeded. `GRADE_FEEDBACK_RANGE` went 120 → 81. Verify afterwards, console
+level → deck grade: 3 → 2.99, 5 → 4.97, 7 → 6.82 (**7 is a real level again, no snap to 10**),
+10 → 9.18 (the deck's physical top). So the 1.45× map and the 7/8/9 → 10 snap were a stale
+incline calibration on the unit, not the console's grade table. Gotcha built in: the board idles
+at CALIBRATE_GRADE = 4 (its last result), so the step only accepts a terminal state after the
+value has visibly left the pre-write state. The board publishes CALIBRATE_GRADE,
+GRADE_FEEDBACK_RANGE and MIN_GRADE; it pruned the HDRV_* and GRADE_CORRECTION_* telemetry.
+Re-run the quick matrices to re-baseline; TwinView's incline tolerances should now hold.
+
 **Stop-to-stop over FP2** (`treadmill.fp2_accel_decel_matrix`, the twin of
 `treadmill.accel_decel_matrix`): per cell belt confirmed at rest (tach), deck returned to 0 %
 AND driven to the cell's incline (console CURRENT_GRADE confirms, fallback settle), TARGET_KPH
